@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+
+# Secrets / local config. .env.example IS committed; .env is not — it is the
+# file that would hold a real password once this app talks to anything but
+# localhost.
+.env
+
+# Node
+node_modules/
+dist/
+
+# macOS
+.DS_Store

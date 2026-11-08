@@ -1,0 +1,13 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+sqlalchemy==2.0.36
+alembic==1.14.0
+# psycopg 3 ("psycopg"), not the older psycopg2. [binary] ships a prebuilt
+# wheel so there is no need for a local libpq / compiler toolchain.
+psycopg[binary]==3.2.3
+pydantic==2.10.4
+pydantic-settings==2.7.0
+
+# Tests
+pytest==8.3.4
+httpx==0.28.1
