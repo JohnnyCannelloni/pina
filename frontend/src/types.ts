@@ -13,6 +13,20 @@
 /** Matches the Category enum in models.py and ck_places_category in 0001. */
 export type Category = "restaurant" | "cafe" | "sight";
 
+/** Every category, in display order. One array so the filter chips, the form
+ *  dropdown, and the default search all agree. */
+export const ALL_CATEGORIES: readonly Category[] = [
+  "restaurant",
+  "cafe",
+  "sight",
+];
+
+/**
+ * Where a saved place came from. Matches PlaceSource in models.py and
+ * ck_places_source in migration 0002.
+ */
+export type PlaceSource = "manual" | "osm";
+
 /** A saved place. `latitude`/`longitude` are null when it has no pin. */
 export interface Place {
   id: number;
@@ -23,16 +37,113 @@ export interface Place {
   /** Null together with longitude — see ck_places_coords_both_or_neither. */
   latitude: number | null;
   longitude: number | null;
+  source: PlaceSource;
+  /** The OpenStreetMap element id ("node/123") if saved from the map, else null. */
+  source_ref: string | null;
   /** ISO 8601 string; JSON has no date type. */
   created_at: string;
 }
 
-/** A destination. Its coordinates are where the map opens. */
+/**
+ * A place from OpenStreetMap that you could save — a candidate, not a record.
+ *
+ * Note there is no `id`: suggestions are never stored, so they have no primary
+ * key. `source_ref` is their identity, and it becomes Place.source_ref if you
+ * save one. Backend counterpart: the Suggestion schema in schemas.py.
+ */
+export interface Suggestion {
+  source_ref: string;
+  name: string;
+  category: Category;
+  /** Never null, unlike a Place — a suggestion always has a position. */
+  latitude: number;
+  longitude: number;
+  already_saved: boolean;
+}
+
+/** One grid cell of a zoomed-out view: how many places, and where they are.
+ *
+ *  The coordinates are the *average* position of the places in the cell, not
+ *  the cell's centre, so a bubble sits on the places rather than on a grid
+ *  line. Matches Cluster in schemas.py. */
+export interface Cluster {
+  latitude: number;
+  longitude: number;
+  count: number;
+}
+
+/** Whether the server has imported data for the requested viewport.
+ *
+ *  Exists because an empty list is ambiguous: a map with no markers looks the
+ *  same whether the area is genuinely empty or was never imported. Saying which
+ *  is the difference between "nothing here" and "nothing *yet*". */
+export type Coverage = "covered" | "partial" | "missing";
+
+/** What the map gets back for one viewport.
+ *
+ *  `mode` says which list to read; the other is empty. The server decides from
+ *  the actual count, not from a zoom level we send — density varies far more
+ *  than zoom does. Matches NearbyResponse in schemas.py. */
+export interface NearbyResponse {
+  mode: "places" | "clusters";
+  /** Total matching places in view, whichever mode. In cluster mode the counts
+   *  sum to this. */
+  total: number;
+  coverage: Coverage;
+  places: Suggestion[];
+  clusters: Cluster[];
+}
+
+/** The map rectangle to search inside. Matches BoundingBox in schemas.py. */
+export interface Bounds {
+  south: number;
+  west: number;
+  north: number;
+  east: number;
+}
+
+/**
+ * How a destination's OpenStreetMap place cache is doing.
+ * Matches SyncState in models.py.
+ */
+export type SyncState = "pending" | "syncing" | "ready" | "failed";
+
+/** A destination: where it is, how big it is, and whether its places arrived. */
 export interface Destination {
   id: number;
   name: string;
   latitude: number;
   longitude: number;
+  /** The stored area. The map opens on these bounds, so a town and a city
+   *  both frame correctly instead of sharing one arbitrary zoom. */
+  south: number;
+  west: number;
+  north: number;
+  east: number;
+  sync_state: SyncState;
+  sync_error: string | null;
+  synced_at: string | null;
+}
+
+/**
+ * How a region's OpenStreetMap extract is doing. Matches ExtractState in
+ * models.py. Downloading and importing are separate because they are very
+ * different waits — minutes of network versus seconds of parsing.
+ */
+export type ExtractState =
+  | "pending"
+  | "downloading"
+  | "importing"
+  | "ready"
+  | "failed";
+
+/** Destination plus cache status — what the UI polls while places load. */
+export interface DestinationDetail extends Destination {
+  osm_place_count: number;
+  /** Geofabrik region, e.g. "europe/portugal". Null when we have no map data
+   *  for this country; the destination still works for manual saves. */
+  region: string | null;
+  extract_state: ExtractState | null;
 }
 
 export interface Trip {
@@ -40,6 +151,27 @@ export interface Trip {
   name: string;
   destinations: Destination[];
 }
+
+/** A candidate destination from the geocoder, before you pick one. */
+export interface GeocodeCandidate {
+  /** "Venice, Veneto, Italy" — the full label, so Venice Italy and Venice
+   *  Florida are distinguishable. */
+  display_name: string;
+  /** "Venice" — what the destination gets called. */
+  name: string;
+  latitude: number;
+  longitude: number;
+  south: number;
+  west: number;
+  north: number;
+  east: number;
+  osm_ref: string;
+  /** ISO 3166-1 alpha-2. Decides which OSM extract gets downloaded. */
+  country_code: string | null;
+}
+
+/** The POST body for creating a destination: a candidate, minus its label. */
+export type NewDestination = Omit<GeocodeCandidate, "display_name">;
 
 /**
  * The POST body. Mirrors PlaceCreate: no `id`, no `created_at` (the database
@@ -51,6 +183,13 @@ export interface NewPlace {
   must_go: boolean;
   latitude: number | null;
   longitude: number | null;
+  /**
+   * Omitted by the manual form (the backend defaults it to "manual"); set to
+   * "osm" with a source_ref when saving a map suggestion. The backend rejects
+   * a mismatch between the two — see ck_places_source_ref_present.
+   */
+  source?: PlaceSource;
+  source_ref?: string;
 }
 
 /** For the category dropdown, and for rendering a label in the list and popup. */

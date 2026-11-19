@@ -1,111 +1,344 @@
 /**
- * The Map view: the same saved places as the list, filtered to those with a pin.
+ * The Map view: your saved pins plus everything OpenStreetMap knows is nearby.
  *
- * There is no separate map data source and no separate fetch. `places` is the
- * identical array PlaceList renders, passed down from DestinationPage. That is
- * what makes "save a place, switch to Map, refresh, find the pin in the same
- * spot" true without any syncing — the pin is just a column on the row.
+ * READ THIS LAST. The headline change from the previous version is what is
+ * *missing*: there is no "Search this area" button and no zoom gate. Markers
+ * load by themselves, on open and whenever you stop panning.
+ *
+ * That is only affordable because `/nearby` is now an indexed query against our
+ * own `osm_places` table (filled in the background by app/sync.py) instead of a
+ * live Overpass call. A few milliseconds can be spent on every map movement; 3
+ * to 30 seconds, or a 502, cannot. The architecture change is what made the UX
+ * change possible — the button was a symptom.
  */
 
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import L from "leaflet";
-import { MapContainer, Marker, Popup, TileLayer, useMap } from "react-leaflet";
+import {
+  MapContainer,
+  Marker,
+  Popup,
+  TileLayer,
+  useMap,
+  useMapEvents,
+} from "react-leaflet";
 
+import { fetchNearby } from "./api";
+import { CategoryFilter } from "./CategoryFilter";
+import { ClusterMarkers } from "./ClusterMarkers";
 import { mustGoIcon, placeIcon } from "./leafletIcons";
+import { MapLegend } from "./MapLegend";
 import {
   CITY_ZOOM,
+  LABEL_ZOOM,
   MAX_FIT_ZOOM,
+  MOVE_DEBOUNCE_MS,
   OSM_ATTRIBUTION,
   OSM_TILE_URL,
 } from "./mapConfig";
-import { CATEGORY_LABELS, type Destination, type Place } from "./types";
+import { SuggestionMarkers } from "./SuggestionMarkers";
+import {
+  ALL_CATEGORIES,
+  CATEGORY_LABELS,
+  type Category,
+  type DestinationDetail,
+  type NearbyResponse,
+  type Place,
+} from "./types";
 
 interface MapViewProps {
   places: Place[];
-  destination: Destination;
-  /** Lets the "N places have no pin" notice send the user to the list. */
+  destination: DestinationDetail;
   onShowList: () => void;
+  onSaved: (place: Place) => void;
+  focusedPlaceId: number | null;
 }
 
-/**
- * A place that definitely has coordinates.
- *
- * TypeScript cannot tell that `place.latitude !== null` also narrows
- * `place.longitude`, because they are independent fields as far as the type
- * system knows — the both-or-neither rule lives in the database, not the type.
- * This alias plus the type guard below gives the compiler that knowledge once,
- * instead of forcing a non-null assertion at every use.
- */
 type PinnedPlace = Place & { latitude: number; longitude: number };
 
 function hasPin(place: Place): place is PinnedPlace {
   return place.latitude !== null && place.longitude !== null;
 }
 
-/**
- * Frames the map on the pins, once per mount.
+/** Frames the map on the destination's stored area, once per mount.
  *
- * Leaflet's imperative API is the right tool here: "fit these bounds" is an
- * action, not a prop. `useMap` reaches the map instance from inside
- * MapContainer.
- *
- * The ref guard makes this fire once per mount rather than on every render.
- * Switching tabs unmounts this component, so going to Map always reframes on
- * the current pins — but saving a place while already on Map will not yank the
- * view out from under you.
- */
-function FitToPins({ pinned }: { pinned: PinnedPlace[] }) {
+ *  Using the destination's own bounding box rather than a fixed zoom is what
+ *  lets a small town and a large city both open sensibly. If the user has pins
+ *  already, those win — you care more about your own list than about the city
+ *  outline. */
+function FitToArea({
+  destination,
+  pinned,
+}: {
+  destination: DestinationDetail;
+  pinned: PinnedPlace[];
+}) {
   const map = useMap();
   const hasFitted = useRef(false);
 
   useEffect(() => {
-    if (hasFitted.current || pinned.length === 0) {
+    if (hasFitted.current) {
       return;
     }
     hasFitted.current = true;
 
-    const bounds = L.latLngBounds(
-      pinned.map((place) => [place.latitude, place.longitude]),
+    if (pinned.length > 0) {
+      map.fitBounds(
+        L.latLngBounds(pinned.map((p) => [p.latitude, p.longitude])),
+        { padding: [40, 40], maxZoom: MAX_FIT_ZOOM },
+      );
+      return;
+    }
+
+    map.fitBounds(
+      L.latLngBounds(
+        [destination.south, destination.west],
+        [destination.north, destination.east],
+      ),
+      { padding: [20, 20], maxZoom: MAX_FIT_ZOOM },
     );
-    // maxZoom stops a single pin from zooming to maximum street detail, which
-    // loses all sense of where in the city it is. padding keeps markers off
-    // the very edge of the frame.
-    map.fitBounds(bounds, { padding: [40, 40], maxZoom: MAX_FIT_ZOOM });
-  }, [map, pinned]);
+  }, [map, destination, pinned]);
 
   return null;
 }
 
-export function MapView({ places, destination, onShowList }: MapViewProps) {
-  const pinned = places.filter(hasPin);
+/**
+ * Loads suggestions for whatever is on screen, and keeps doing it as you pan.
+ *
+ * `useMapEvents` gives us `moveend`, which fires once a gesture settles rather
+ than on every animation frame. The debounce on top absorbs several quick pans
+ * in a row. The abort flag is the important detail: without it, a slow earlier
+ * response could land after a faster later one and repaint the map with markers
+ * for an area you have already left.
+ */
+function SuggestionLoader({
+  destinationId,
+  categories,
+  onLoaded,
+  onError,
+  onZoom,
+}: {
+  destinationId: number;
+  categories: readonly Category[];
+  onLoaded: (response: NearbyResponse) => void;
+  onError: (message: string | null) => void;
+  onZoom: (zoom: number) => void;
+}) {
+  const map = useMap();
+  // Incremented per request; only the newest result is allowed to win.
+  const requestId = useRef(0);
+  const timer = useRef<number | null>(null);
+
+  const load = useCallback(async () => {
+    const bounds = map.getBounds();
+    const id = ++requestId.current;
+
+    try {
+      const response = await fetchNearby(
+        destinationId,
+        {
+          south: bounds.getSouth(),
+          west: bounds.getWest(),
+          north: bounds.getNorth(),
+          east: bounds.getEast(),
+        },
+        categories,
+      );
+      if (id === requestId.current) {
+        onLoaded(response);
+        onError(null);
+      }
+    } catch (caught) {
+      if (id === requestId.current) {
+        // A local database read failing means our own API is down, not a third
+        // party — so unlike the old Overpass path this is genuinely unexpected.
+        onError(
+          caught instanceof Error ? caught.message : "Could not load places.",
+        );
+      }
+    }
+  }, [map, destinationId, categories, onLoaded, onError]);
+
+  const schedule = useCallback(() => {
+    if (timer.current !== null) {
+      window.clearTimeout(timer.current);
+    }
+    timer.current = window.setTimeout(() => void load(), MOVE_DEBOUNCE_MS);
+  }, [load]);
+
+  useMapEvents({
+    moveend: () => {
+      onZoom(map.getZoom());
+      schedule();
+    },
+  });
+
+  // Load once on mount, and again whenever the category filter changes — the
+  // server only returns the categories asked for, so a chip toggle needs a
+  // refetch rather than a client-side filter.
+  useEffect(() => {
+    onZoom(map.getZoom());
+    void load();
+    return () => {
+      if (timer.current !== null) {
+        window.clearTimeout(timer.current);
+      }
+    };
+  }, [load, map, onZoom]);
+
+  return null;
+}
+
+/** Pans to the focused place and opens its popup — the list-to-map link. */
+function FlyToFocused({
+  focusedPlaceId,
+  markers,
+}: {
+  focusedPlaceId: number | null;
+  markers: React.RefObject<Map<number, L.Marker>>;
+}) {
+  const map = useMap();
+
+  useEffect(() => {
+    if (focusedPlaceId === null) {
+      return;
+    }
+    const marker = markers.current?.get(focusedPlaceId);
+    if (!marker) {
+      return;
+    }
+    map.flyTo(marker.getLatLng(), Math.max(map.getZoom(), MAX_FIT_ZOOM), {
+      duration: 0.6,
+    });
+    map.once("moveend", () => marker.openPopup());
+  }, [focusedPlaceId, map, markers]);
+
+  return null;
+}
+
+export function MapView({
+  places,
+  destination,
+  onShowList,
+  onSaved,
+  focusedPlaceId,
+}: MapViewProps) {
+  const [shown, setShown] = useState<ReadonlySet<Category>>(
+    () => new Set(ALL_CATEGORIES),
+  );
+  // The whole envelope, not just a list: `mode` decides what to draw and
+  // `coverage` decides what to say when there is nothing.
+  const [nearby, setNearby] = useState<NearbyResponse>({
+    mode: "places",
+    total: 0,
+    coverage: "missing",
+    places: [],
+    clusters: [],
+  });
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [zoom, setZoom] = useState(CITY_ZOOM);
+
+  const markers = useRef<Map<number, L.Marker>>(new Map());
+
+  const pinned = useMemo(() => places.filter(hasPin), [places]);
+
+  // Which OSM places are already saved. Derived from `places`, so saving a
+  // suggestion removes its marker on the next render with no extra state.
+  const savedRefs = useMemo(
+    () =>
+      new Set(
+        places
+          .map((place) => place.source_ref)
+          .filter((ref): ref is string => ref !== null),
+      ),
+    [places],
+  );
+
+  // A stable array for SuggestionLoader's dependency list. Without useMemo this
+  // would be a new array every render, and the effect would refetch in a loop.
+  const activeCategories = useMemo(
+    () => ALL_CATEGORIES.filter((category) => shown.has(category)),
+    [shown],
+  );
+
+  const visiblePins = pinned.filter((place) => shown.has(place.category));
+  // Only meaningful in "places" mode; empty in "clusters" mode because the
+  // server sent counts instead.
+  const visibleSuggestions = nearby.places.filter(
+    (suggestion) =>
+      !suggestion.already_saved && !savedRefs.has(suggestion.source_ref),
+  );
+  const showingClusters = nearby.mode === "clusters";
+
   const withoutPin = places.length - pinned.length;
+  const showLabels = zoom >= LABEL_ZOOM;
+
+  const handleLoaded = useCallback((response: NearbyResponse) => {
+    setNearby(response);
+  }, []);
 
   return (
     <div className="mapview">
+      <div className="mapview__controls">
+        <CategoryFilter selected={shown} onChange={setShown} />
+        <span className="mapview__hint" role="status">
+          {showingClusters
+            ? `${nearby.total.toLocaleString()} places here — zoom in or tap a circle`
+            : visibleSuggestions.length > 0
+              ? `${visibleSuggestions.length} place${
+                  visibleSuggestions.length === 1 ? "" : "s"
+                } to explore here`
+              : nearby.coverage === "missing"
+                ? "No map data loaded for this area yet."
+                : "No places here — try panning or zooming out."}
+          {!showingClusters &&
+            !showLabels &&
+            visibleSuggestions.length > 0 &&
+            " · zoom in for names"}
+        </span>
+      </div>
+
+      {loadError !== null && (
+        <p className="error" role="alert">
+          <strong>Could not load places.</strong> {loadError}
+        </p>
+      )}
+
       <MapContainer
         className="mapview__map"
-        // The fallback when there are no pins at all: the destination's own
-        // coordinates, which came from the database — so there is no Venice
-        // constant anywhere in this codebase.
         center={[destination.latitude, destination.longitude]}
         zoom={CITY_ZOOM}
         scrollWheelZoom
       >
         <TileLayer url={OSM_TILE_URL} attribution={OSM_ATTRIBUTION} />
-        <FitToPins pinned={pinned} />
+        <FitToArea destination={destination} pinned={pinned} />
+        <SuggestionLoader
+          destinationId={destination.id}
+          categories={activeCategories}
+          onLoaded={handleLoaded}
+          onError={setLoadError}
+          onZoom={setZoom}
+        />
+        <FlyToFocused focusedPlaceId={focusedPlaceId} markers={markers} />
 
-        {pinned.map((place) => (
+        {visiblePins.map((place) => (
           <Marker
             key={place.id}
             position={[place.latitude, place.longitude]}
             icon={place.must_go ? mustGoIcon : placeIcon}
+            ref={(instance) => {
+              if (instance) {
+                markers.current.set(place.id, instance);
+              } else {
+                markers.current.delete(place.id);
+              }
+            }}
           >
-            {/* Selecting a marker opens this. Leaflet handles the click, the
-                positioning, and closing it on the next click. */}
             <Popup>
               <span className="popup__name">{place.name}</span>
               <span className="popup__meta">
                 {CATEGORY_LABELS[place.category]}
+                {place.source === "osm" && " · from OpenStreetMap"}
               </span>
               <span
                 className={
@@ -117,27 +350,50 @@ export function MapView({ places, destination, onShowList }: MapViewProps) {
             </Popup>
           </Marker>
         ))}
+
+        {/* One of the two, never both: the server sent one list and left the
+            other empty. Rendering from `mode` rather than from "is the list
+            non-empty" keeps an empty viewport in places-mode from being
+            mistaken for cluster-mode. */}
+        {showingClusters ? (
+          <ClusterMarkers clusters={nearby.clusters} />
+        ) : (
+          <SuggestionMarkers
+            suggestions={visibleSuggestions}
+            destinationId={destination.id}
+            destinationName={destination.name}
+            onSaved={onSaved}
+            showLabels={showLabels}
+          />
+        )}
       </MapContainer>
 
-      {/* Empty state: distinct from the list's, because "nothing saved" and
-          "things saved, none pinned" need different advice. */}
-      {pinned.length === 0 && (
-        <div className="mapview__empty" role="status">
-          <p className="empty__title">No pinned places yet.</p>
-          <p className="empty__hint">
-            {places.length === 0
-              ? `Save a place for ${destination.name} and drop a pin to see it here.`
-              : "Drop a pin while saving a place to see it on the map."}
-          </p>
-        </div>
+      <MapLegend />
+
+      {/* The honest answer to an empty map. Before this existed, "this area
+          was never imported" and "there is genuinely nothing here" looked
+          identical — which is what made two earlier versions of this feature
+          feel broken. */}
+      {nearby.coverage === "missing" && nearby.total === 0 && (
+        <p className="mapview__note" role="status">
+          No OpenStreetMap data has been loaded for this area yet.
+          {destination.region
+            ? ` Run: python -m app.fill_places --region ${destination.region}`
+            : " Pina could not work out which map region covers it."}
+        </p>
       )}
 
-      {/* A place saved without a pin is not on the map, so say so here rather
-          than letting the user wonder where it went. */}
+      {nearby.coverage === "partial" && (
+        <p className="mapview__note" role="status">
+          Part of this view is outside the loaded map data — panning further may
+          show nothing.
+        </p>
+      )}
+
       {withoutPin > 0 && (
         <p className="mapview__note">
-          {withoutPin} {withoutPin === 1 ? "place has" : "places have"} no pin
-          yet.{" "}
+          {withoutPin} saved {withoutPin === 1 ? "place has" : "places have"} no
+          pin.{" "}
           <button type="button" className="linkbutton" onClick={onShowList}>
             See all places
           </button>

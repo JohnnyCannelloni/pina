@@ -28,6 +28,17 @@ DESTINATION_NAME = "Venice"
 VENICE_LATITUDE = 45.4408
 VENICE_LONGITUDE = 12.3155
 
+# The area whose places get synced from OpenStreetMap. Deliberately the same
+# half-span the 0003 migration used to backfill existing destinations, so a
+# seeded Venice and a migrated Venice are identical — otherwise re-seeding an
+# already-migrated database would quietly move the boundary and orphan tiles.
+#
+# Venice is seeded with explicit coordinates rather than geocoded, because the
+# seed has to work with no network. Every *other* destination gets its area from
+# Nominatim via the add-destination flow; this is the one hardcoded case, and
+# it exists only so a fresh database has something in it.
+VENICE_HALF_SPAN = 0.06
+
 
 def seed(db: Session) -> Destination:
     """Ensure Italy -> Venice exists; return the Venice destination.
@@ -58,6 +69,10 @@ def seed(db: Session) -> Destination:
             name=DESTINATION_NAME,
             latitude=VENICE_LATITUDE,
             longitude=VENICE_LONGITUDE,
+            south=VENICE_LATITUDE - VENICE_HALF_SPAN,
+            north=VENICE_LATITUDE + VENICE_HALF_SPAN,
+            west=VENICE_LONGITUDE - VENICE_HALF_SPAN,
+            east=VENICE_LONGITUDE + VENICE_HALF_SPAN,
         )
         db.add(destination)
         db.flush()

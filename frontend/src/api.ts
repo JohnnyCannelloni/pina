@@ -12,7 +12,17 @@
  * API is not running".
  */
 
-import type { NewPlace, Place, Trip } from "./types";
+import type {
+  Bounds,
+  Category,
+  DestinationDetail,
+  GeocodeCandidate,
+  NearbyResponse,
+  NewDestination,
+  NewPlace,
+  Place,
+  Trip,
+} from "./types";
 
 /** Relative, not absolute: Vite proxies /api to localhost:8000 in dev, and the
  *  same path works in production when API and static files share a host. */
@@ -118,5 +128,88 @@ export function createPlace(
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(place),
+  });
+}
+
+/**
+ * GET /api/destinations/{id}/nearby — what to draw for this viewport.
+ *
+ * A read of our own indexed table, not a third-party call, which is why it can
+ * run on every map movement. Returns either real places or cluster counts
+ * depending on how many are in view — see NearbyResponse.
+ */
+export function fetchNearby(
+  destinationId: number,
+  bounds: Bounds,
+  categories: readonly Category[],
+): Promise<NearbyResponse> {
+  // URLSearchParams handles the encoding, and `append` called repeatedly is how
+  // you build the ?categories=restaurant&categories=cafe form that FastAPI
+  // parses into a list. A comma-joined single value would arrive as one string
+  // named "restaurant,cafe" and fail validation.
+  const params = new URLSearchParams({
+    south: String(bounds.south),
+    west: String(bounds.west),
+    north: String(bounds.north),
+    east: String(bounds.east),
+  });
+  for (const category of categories) {
+    params.append("categories", category);
+  }
+
+  return request<NearbyResponse>(
+    `/destinations/${destinationId}/nearby?${params.toString()}`,
+  );
+}
+
+/**
+ * GET /api/geocode — candidate destinations for a typed name.
+ *
+ * Several are returned on purpose: "Venice" exists in Italy, Florida and
+ * California, so the user picks. This is the one place a third party is called
+ * during an interaction, and it is cheap — one lookup when someone adds a city.
+ */
+export function geocode(query: string): Promise<GeocodeCandidate[]> {
+  const params = new URLSearchParams({ q: query });
+  return request<GeocodeCandidate[]>(`/geocode?${params.toString()}`);
+}
+
+/**
+ * POST /api/trips/{id}/destinations — add a destination and start its sync.
+ *
+ * Returns immediately with sync_state 'pending'; fetching its places happens in
+ * the background. Poll getDestination to follow it.
+ *
+ * The chosen candidate is sent back in full rather than just its name, so the
+ * destination is built from exactly the place the user picked — re-geocoding
+ * server-side could silently resolve to a different one.
+ */
+export function createDestination(
+  tripId: number,
+  destination: NewDestination,
+): Promise<DestinationDetail> {
+  return request<DestinationDetail>(`/trips/${tripId}/destinations`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(destination),
+  });
+}
+
+/** GET /api/destinations/{id} — destination plus sync progress. */
+export function getDestination(
+  destinationId: number,
+): Promise<DestinationDetail> {
+  return request<DestinationDetail>(`/destinations/${destinationId}`);
+}
+
+/**
+ * POST /api/destinations/{id}/sync — re-run or resume the place sync.
+ *
+ * Safe at any time: finished areas are skipped and re-fetched places are
+ * updated rather than duplicated. Your saved places are never touched.
+ */
+export function startSync(destinationId: number): Promise<DestinationDetail> {
+  return request<DestinationDetail>(`/destinations/${destinationId}/sync`, {
+    method: "POST",
   });
 }
