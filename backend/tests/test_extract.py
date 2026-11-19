@@ -7,6 +7,7 @@ only the 476 MB download is absent.
 """
 
 import json
+import threading
 from pathlib import Path
 
 import osmium
@@ -16,8 +17,20 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app import extract as extract_module
 from app import regions as regions_module
-from app.extract import ExtractError, import_extract
-from app.models import Destination, ExtractState, OsmPlace, Place, SyncState
+from app.extract import (
+    ExtractCancelled,
+    ExtractError,
+    download_extract,
+    import_extract,
+)
+from app.models import (
+    Destination,
+    ExtractState,
+    OsmExtract,
+    OsmPlace,
+    Place,
+    SyncState,
+)
 from app.regions import (
     Region,
     UnsupportedRegion,
@@ -439,3 +452,156 @@ def test_sync_reports_an_unsupported_location_without_touching_saved_places(
         .select_from(Place)
         .where(Place.destination_id == venice.id)
     ) == 1
+
+
+# --- cancelling a download -------------------------------------------------
+
+
+class _FakeStream:
+    """Stands in for httpx.stream: a 200 response of `chunks` 1-byte chunks.
+
+    `on_chunk` runs as each chunk is handed out, which lets a test flip the
+    cancel flag partway through — the situation a real cancel is in.
+    """
+
+    status_code = 200
+    is_error = False
+
+    def __init__(self, chunks: int, on_chunk) -> None:
+        self._chunks = chunks
+        self._on_chunk = on_chunk
+
+    def __enter__(self) -> "_FakeStream":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+    def iter_bytes(self, chunk_size: int):
+        for index in range(self._chunks):
+            self._on_chunk(index)
+            yield b"x"
+
+
+def _testland_region() -> Region:
+    return Region(
+        id=REGION,
+        name=REGION,
+        south=45.0,
+        west=12.0,
+        north=46.0,
+        east=13.0,
+        pbf_url="https://example.test/testland.osm.pbf",
+    )
+
+
+def test_a_cancelled_download_stops_and_removes_its_partial_file(
+    cached_extract: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cancel = threading.Event()
+    handed_out: list[int] = []
+
+    def on_chunk(index: int) -> None:
+        handed_out.append(index)
+        if index == 2:
+            cancel.set()
+
+    monkeypatch.setattr(extract_module, "find_region", lambda _: _testland_region())
+    monkeypatch.setattr(
+        extract_module.httpx, "stream", lambda *a, **k: _FakeStream(100, on_chunk)
+    )
+
+    with pytest.raises(ExtractCancelled):
+        download_extract(REGION, cancel=cancel)
+
+    # Stopped at the chunk where the flag was set, not after all 100.
+    assert len(handed_out) == 3
+    partial = cached_extract.with_suffix(cached_extract.suffix + ".part")
+    assert not partial.exists()
+    assert not cached_extract.exists()
+
+
+def test_an_uncancelled_download_completes(
+    cached_extract: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same fake, never cancelled: proves the check does not misfire."""
+    monkeypatch.setattr(extract_module, "find_region", lambda _: _testland_region())
+    monkeypatch.setattr(
+        extract_module.httpx, "stream", lambda *a, **k: _FakeStream(5, lambda _: None)
+    )
+
+    path = download_extract(REGION, cancel=threading.Event())
+
+    assert path == cached_extract
+    assert path.read_bytes() == b"xxxxx"
+
+
+def test_a_cancelled_sync_cleans_up_instead_of_failing(
+    db_session: Session,
+    sync_session_factory: sessionmaker[Session],
+    venice: Destination,
+    cached_extract: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No row left stuck at 'downloading', and no retryable-failure message."""
+    import app.sync as sync_module
+
+    venice.region = REGION
+    db_session.commit()
+
+    def cancelled_download(region: str, cancel: threading.Event) -> Path:
+        # While "downloading", the sync must have registered its cancel flag.
+        assert sync_module._downloads.get(region) is cancel
+        raise ExtractCancelled("cancelled")
+
+    monkeypatch.setattr(sync_module, "download_extract", cancelled_download)
+
+    sync_destination(venice.id, session_factory=sync_session_factory)
+
+    db_session.expire_all()
+    assert db_session.scalar(
+        select(OsmExtract).where(OsmExtract.region == REGION)
+    ) is None
+    # The flag is unregistered once the sync is over.
+    assert REGION not in sync_module._downloads
+
+    refreshed = db_session.get(Destination, venice.id)
+    assert refreshed is not None
+    assert refreshed.sync_state == SyncState.FAILED
+    assert refreshed.sync_error == "The download was cancelled."
+
+
+def test_a_sync_cancelled_because_its_destination_was_deleted(
+    db_session: Session,
+    sync_session_factory: sessionmaker[Session],
+    venice: Destination,
+    cached_extract: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real sequence: the destination is deleted *during* the download.
+
+    The sync's own session still holds the destination it loaded at the start.
+    This caught a StaleDataError in the first version, which wrote "cancelled"
+    onto that stale copy and lost the cleanup with the failed commit.
+    """
+    import app.sync as sync_module
+
+    venice.region = REGION
+    db_session.commit()
+    venice_id = venice.id
+
+    def deleted_mid_download(region: str, cancel: threading.Event) -> Path:
+        # Another session — the DELETE request — removes it while we download.
+        db_session.delete(db_session.get(Destination, venice_id))
+        db_session.commit()
+        raise ExtractCancelled("cancelled")
+
+    monkeypatch.setattr(sync_module, "download_extract", deleted_mid_download)
+
+    sync_destination(venice_id, session_factory=sync_session_factory)
+
+    db_session.expire_all()
+    assert db_session.get(Destination, venice_id) is None
+    assert db_session.scalar(
+        select(OsmExtract).where(OsmExtract.region == REGION)
+    ) is None

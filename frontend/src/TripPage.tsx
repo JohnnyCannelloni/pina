@@ -13,7 +13,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { AddDestination } from "./AddDestination";
-import { getDestination } from "./api";
+import { deleteDestination, getDestination } from "./api";
 import { DestinationPage } from "./DestinationPage";
 import { SyncStatus } from "./SyncStatus";
 import type { DestinationDetail, Trip } from "./types";
@@ -88,6 +88,33 @@ export function TripPage({ trip }: TripPageProps) {
     setDetail(created);
   }
 
+  /**
+   * Called by DestinationPage once the user has confirmed.
+   *
+   * Lives here, not in DestinationPage, because this component owns the
+   * destination list and the selection — both change when one is deleted.
+   * State is updated only after the API succeeds, so a failed delete cannot
+   * hide a destination that still exists.
+   */
+  async function handleDeleteDestination(destinationId: number) {
+    try {
+      await deleteDestination(destinationId);
+    } catch (caught) {
+      window.alert(
+        caught instanceof Error
+          ? caught.message
+          : "Could not delete the destination.",
+      );
+      return;
+    }
+
+    const remaining = destinations.filter((d) => d.id !== destinationId);
+    setDestinations(remaining);
+    // Show the next destination, or the "No destinations yet" state when that
+    // was the last one. Changing selectedId re-runs the detail effect above.
+    setSelectedId(remaining[0]?.id ?? null);
+  }
+
   return (
     <main className="page">
       <header className="page__header">
@@ -123,7 +150,10 @@ export function TripPage({ trip }: TripPageProps) {
       )}
 
       {detail !== null ? (
-        <DestinationPage destination={detail} />
+        <DestinationPage
+          destination={detail}
+          onDelete={handleDeleteDestination}
+        />
       ) : (
         error === null &&
         selectedId !== null && (

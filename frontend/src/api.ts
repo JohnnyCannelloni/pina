@@ -101,6 +101,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiError(await extractErrorMessage(response), response.status);
   }
 
+  // 204 No Content (a DELETE) has an empty body, and response.json() throws
+  // on an empty body — which would turn a successful delete into an error.
+  if (response.status === 204) {
+    return undefined as T;
+  }
+
   return (await response.json()) as T;
 }
 
@@ -128,6 +134,21 @@ export function createPlace(
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(place),
+  });
+}
+
+/**
+ * DELETE /api/destinations/{id}/places/{placeId} — remove a saved place.
+ *
+ * Only your collection changes; a place saved from the map becomes a
+ * suggestion again.
+ */
+export function deletePlace(
+  destinationId: number,
+  placeId: number,
+): Promise<void> {
+  return request<void>(`/destinations/${destinationId}/places/${placeId}`, {
+    method: "DELETE",
   });
 }
 
@@ -200,6 +221,15 @@ export function getDestination(
   destinationId: number,
 ): Promise<DestinationDetail> {
   return request<DestinationDetail>(`/destinations/${destinationId}`);
+}
+
+/**
+ * DELETE /api/destinations/{id} — remove a destination and its saved places.
+ *
+ * The downloaded map data is kept, so re-adding the city fills it instantly.
+ */
+export function deleteDestination(destinationId: number): Promise<void> {
+  return request<void>(`/destinations/${destinationId}`, { method: "DELETE" });
 }
 
 /**

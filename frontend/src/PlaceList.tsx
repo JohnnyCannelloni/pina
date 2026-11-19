@@ -17,12 +17,15 @@ interface PlaceListProps {
   destinationName: string;
   /** Switches to the Map view, pans to this place and opens its popup. */
   onFocusPlace: (placeId: number) => void;
+  /** Deletes the place. Called only after the user has confirmed. */
+  onDeletePlace: (placeId: number) => void;
 }
 
 export function PlaceList({
   places,
   destinationName,
   onFocusPlace,
+  onDeletePlace,
 }: PlaceListProps) {
   if (places.length === 0) {
     return (
@@ -67,7 +70,10 @@ export function PlaceList({
         );
 
         return (
-          <li key={place.id}>
+          // The Delete button is a *sibling* of the row, not inside it: a
+          // pinned row is itself a <button>, and a button inside a button is
+          // invalid HTML — clicks would also bubble and fly to the map.
+          <li key={place.id} className="places__item">
             {place.latitude === null ? (
               // A div, not a disabled button: there is no action here, and a
               // disabled button would still be announced as an unavailable
@@ -82,6 +88,18 @@ export function PlaceList({
                 {content}
               </button>
             )}
+            <button
+              type="button"
+              className="linkbutton place__delete"
+              aria-label={`Delete ${place.name}`}
+              onClick={() => {
+                if (window.confirm(`Delete ${place.name}?`)) {
+                  onDeletePlace(place.id);
+                }
+              }}
+            >
+              Delete
+            </button>
           </li>
         );
       })}

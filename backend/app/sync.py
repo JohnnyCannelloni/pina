@@ -38,13 +38,14 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.db import SessionLocal
 from app.extract import (
+    ExtractCancelled,
     ExtractError,
     download_extract,
     extract_path,
     extract_state,
     import_extract,
 )
-from app.models import Destination, ExtractState, SyncState
+from app.models import Destination, ExtractState, OsmExtract, SyncState
 from app.regions import UnsupportedRegion, find_region, resolve_region
 
 logger = logging.getLogger(__name__)
@@ -75,6 +76,27 @@ MAX_DESTINATION_SPAN_DEGREES = 2.0
 # multiple workers this would need a row lock on the destination.
 _active_lock = threading.Lock()
 _active: set[int] = set()
+
+# The cancel flag of each download in progress, by region. A fresh Event per
+# sync rather than a set of "cancelled regions": re-adding a city after
+# cancelling it must start a clean download, not inherit the old cancellation.
+# Guarded by _active_lock.
+_downloads: dict[str, threading.Event] = {}
+
+
+def cancel_download(region: str) -> bool:
+    """Stop a region's download, if one is running. Returns whether one was.
+
+    Only the download stops. An import already under way finishes: it takes
+    seconds, and the places it writes are a cache that is useful to keep.
+    """
+    with _active_lock:
+        event = _downloads.get(region)
+    if event is None:
+        return False
+    event.set()
+    logger.info("cancelling download of %s", region)
+    return True
 
 
 def clamp_area(
@@ -175,7 +197,17 @@ def sync_destination(
                     extract.error = None
                     db.commit()
 
-                path = download_extract(region)
+                cancel = threading.Event()
+                with _active_lock:
+                    _downloads[region] = cancel
+                try:
+                    path = download_extract(region, cancel=cancel)
+                finally:
+                    with _active_lock:
+                        # Only remove our own flag; a later sync for the same
+                        # region may have registered its own meanwhile.
+                        if _downloads.get(region) is cancel:
+                            del _downloads[region]
                 extract.size_bytes = path.stat().st_size
 
                 # --- import ---
@@ -225,6 +257,30 @@ def sync_destination(
                     region,
                 )
 
+            except ExtractCancelled:
+                # Nothing needs this region any more (its last destination was
+                # deleted). Remove the half-finished tracking row, so the
+                # region looks never-started rather than stuck "downloading".
+                db.rollback()
+                unfinished = db.scalar(
+                    select(OsmExtract).where(
+                        OsmExtract.region == region,
+                        OsmExtract.state != ExtractState.READY,
+                    )
+                )
+                if unfinished is not None:
+                    db.delete(unfinished)
+
+                # Normally the destination is gone — that is why we cancelled.
+                # If it is somehow still here, say so rather than leave it
+                # spinning on "syncing".
+                destination = _reload_destination(db, destination_id)
+                if destination is not None:
+                    destination.sync_state = SyncState.FAILED
+                    destination.sync_error = "The download was cancelled."
+                db.commit()
+                logger.info("sync destination %s cancelled", destination_id)
+
             except ExtractError as exc:
                 # A download or parse failure. The destination is still usable
                 # for manual saves, and the error is retryable — a partial
@@ -235,7 +291,7 @@ def sync_destination(
                 extract.error = str(exc)
                 extract.updated_at = datetime.now(UTC)
 
-                destination = db.get(Destination, destination_id)
+                destination = _reload_destination(db, destination_id)
                 if destination is not None:
                     destination.sync_state = SyncState.FAILED
                     destination.sync_error = str(exc)
@@ -246,6 +302,18 @@ def sync_destination(
         # claimed and unsyncable until the process restarts.
         with _active_lock:
             _active.discard(destination_id)
+
+
+def _reload_destination(db: Session, destination_id: int) -> Destination | None:
+    """The destination as the database has it *now*, or None if deleted.
+
+    Not `db.get()`: that returns the copy this session loaded at the start of
+    the sync without asking the database. If the destination was deleted
+    meanwhile — the normal case for a cancelled download — writing to that
+    stale copy makes the commit fail with StaleDataError ("expected to update
+    1 row; 0 were matched"), which also rolls back the cleanup around it.
+    """
+    return db.scalar(select(Destination).where(Destination.id == destination_id))
 
 
 def get_sync_runner() -> Callable[[int], None]:

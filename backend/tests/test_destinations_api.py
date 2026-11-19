@@ -5,11 +5,22 @@ test touches the network: the Nominatim client and the sync runner are both
 dependency overrides from conftest.py.
 """
 
+import threading
+
+import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.geocode import GeocodeError, GeocodeResult, parse_results
-from app.models import Destination, ExtractState, OsmExtract, SyncState
+from app.models import (
+    Destination,
+    ExtractState,
+    OsmExtract,
+    OsmPlace,
+    Place,
+    SyncState,
+)
 from app.sync import MAX_DESTINATION_SPAN_DEGREES
 from tests.conftest import FakeGeocoder, RecordingSyncRunner
 
@@ -325,3 +336,111 @@ def test_an_unsupported_location_is_created_but_flagged(
     assert body["region"] is None
     assert "No OpenStreetMap region covers" in body["sync_error"]
     assert sync_runner.started == []
+
+
+# --- deleting ---------------------------------------------------------------
+
+
+def test_delete_a_destination(client: TestClient, venice: Destination) -> None:
+    """Gone from its own URL and from the trip list."""
+    response = client.delete(f"/api/destinations/{venice.id}")
+    assert response.status_code == 204, response.text
+    assert response.content == b""
+
+    assert client.get(f"/api/destinations/{venice.id}").status_code == 404
+    trips = client.get("/api/trips").json()
+    assert all(d["id"] != venice.id for t in trips for d in t["destinations"])
+
+
+def test_deleting_a_destination_deletes_its_saved_places(
+    client: TestClient, venice: Destination, db_session: Session
+) -> None:
+    client.post(
+        f"/api/destinations/{venice.id}/places",
+        json={"name": "Caffè Florian", "category": "cafe"},
+    )
+
+    client.delete(f"/api/destinations/{venice.id}")
+
+    remaining = db_session.scalar(
+        select(func.count()).select_from(Place).where(Place.destination_id == venice.id)
+    )
+    assert remaining == 0
+
+
+def test_deleting_a_destination_keeps_the_map_cache(
+    client: TestClient, venice: Destination, db_session: Session
+) -> None:
+    """osm_places is shared by the whole region, so it must survive a delete."""
+    db_session.add(
+        OsmPlace(
+            source_ref="node/42",
+            name="Bar all'Arco",
+            category="cafe",
+            latitude=venice.latitude,
+            longitude=venice.longitude,
+            region="europe/italy",
+        )
+    )
+    db_session.commit()
+
+    client.delete(f"/api/destinations/{venice.id}")
+
+    assert db_session.scalar(
+        select(OsmPlace).where(OsmPlace.source_ref == "node/42")
+    ) is not None
+
+
+def test_delete_an_unknown_destination_is_a_404(client: TestClient) -> None:
+    assert client.delete("/api/destinations/999999").status_code == 404
+
+
+def test_deleting_the_last_destination_in_a_region_cancels_its_download(
+    client: TestClient,
+    venice: Destination,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deleting a city added by mistake must not still download its region."""
+    import app.sync as sync_module
+
+    venice.region = "europe/italy/nord-est"
+    db_session.commit()
+    download = threading.Event()
+    monkeypatch.setitem(sync_module._downloads, venice.region, download)
+
+    client.delete(f"/api/destinations/{venice.id}")
+
+    assert download.is_set()
+
+
+def test_deleting_a_destination_keeps_a_download_another_one_needs(
+    client: TestClient,
+    venice: Destination,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mestre is in the same region as Venice, so its download carries on."""
+    import app.sync as sync_module
+
+    venice.region = "europe/italy/nord-est"
+    db_session.add(
+        Destination(
+            trip_id=venice.trip_id,
+            name="Mestre",
+            latitude=45.49,
+            longitude=12.24,
+            south=45.47,
+            west=12.21,
+            north=45.51,
+            east=12.27,
+            region=venice.region,
+        )
+    )
+    db_session.commit()
+    download = threading.Event()
+    monkeypatch.setitem(sync_module._downloads, venice.region, download)
+
+    client.delete(f"/api/destinations/{venice.id}")
+
+    assert not download.is_set()

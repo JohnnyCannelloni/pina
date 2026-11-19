@@ -65,6 +65,26 @@ body {
   line-height: 1.2;
 }
 
+/* Title on the left, its Delete on the right. Wraps under a long city name on
+   a narrow screen rather than squeezing it. */
+.page__titlerow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.25rem 1rem;
+}
+
+.page__titlerow > .page__title {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.destination__delete {
+  color: var(--error-ink);
+  min-height: 44px;
+}
+
 .card {
   background: var(--surface);
   border: 1px solid var(--line);
@@ -276,6 +296,27 @@ body {
   font: inherit;
   color: inherit;
   text-align: left;
+}
+
+/* A row and its Delete button side by side. The row takes the space; min-width
+   lets a long place name shrink instead of pushing the button off-screen. */
+.places__item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.places__item > .place {
+  flex: 1;
+  min-width: 0;
+}
+
+.place__delete {
+  color: var(--error-ink);
+  /* A comfortable tap target without looking like a primary button. */
+  min-height: 44px;
+  padding: 0 0.5rem;
+  flex-shrink: 0;
 }
 
 .place--clickable {
