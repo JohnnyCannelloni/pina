@@ -19,13 +19,16 @@ from datetime import datetime
 from enum import StrEnum
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -48,6 +51,60 @@ class Category(StrEnum):
     RESTAURANT = "restaurant"
     CAFE = "cafe"
     SIGHT = "sight"
+
+
+class PlaceSource(StrEnum):
+    """Where a saved place came from.
+
+    MANUAL is a place you typed into the form. OSM is a suggestion you saved
+    from the map, in which case Place.source_ref holds the OpenStreetMap element
+    id so the map can tell it is already saved.
+
+    Note what is *not* here: an LLM value. The LLM feature is known future work,
+    but adding the value when the feature exists is a one-line change to this
+    enum and to ck_places_source — whereas a value nothing can produce is a
+    constraint that has stopped describing reality.
+    """
+
+    MANUAL = "manual"
+    OSM = "osm"
+
+
+class SyncState(StrEnum):
+    """How a destination's OpenStreetMap place cache is doing.
+
+    The map reads cached places from `osm_places`; this says whether that cache
+    has been filled yet. It exists so the UI can be honest — a feature that
+    depends on a flaky third party has to say what it is doing, and silence is
+    what made the previous version of this feature feel broken.
+
+    PENDING  created, never synced
+    SYNCING  a background job is working through its tiles
+    READY    every tile succeeded
+    FAILED   at least one tile gave up; sync_error says why, and it is retryable
+    """
+
+    PENDING = "pending"
+    SYNCING = "syncing"
+    READY = "ready"
+    FAILED = "failed"
+
+
+class ExtractState(StrEnum):
+    """How a region's OpenStreetMap extract is doing.
+
+    Downloading and importing are separate states because they fail for
+    different reasons and take very different amounts of time: a 250 MB
+    download is minutes of network, the import is seconds of CPU. Collapsing
+    them into one "working" state would leave the user unable to tell a slow
+    download from a stuck parse.
+    """
+
+    PENDING = "pending"
+    DOWNLOADING = "downloading"
+    IMPORTING = "importing"
+    READY = "ready"
+    FAILED = "failed"
 
 
 class Trip(Base):
@@ -94,6 +151,35 @@ class Destination(Base):
     latitude: Mapped[float] = mapped_column(Float, nullable=False)
     longitude: Mapped[float] = mapped_column(Float, nullable=False)
 
+    # The area to fetch places for, and the map's opening view. Added in 0003.
+    # A centre alone cannot answer "what is in this city" — that needs an
+    # extent. Set from the geocoder's bounding box, clamped by app/sync.py.
+    south: Mapped[float] = mapped_column(Float, nullable=False)
+    west: Mapped[float] = mapped_column(Float, nullable=False)
+    north: Mapped[float] = mapped_column(Float, nullable=False)
+    east: Mapped[float] = mapped_column(Float, nullable=False)
+
+    # See SyncState. Stored as plain text with a CHECK constraint, same reasoning
+    # as Place.category.
+    sync_state: Mapped[str] = mapped_column(
+        String, nullable=False, server_default="pending"
+    )
+    sync_error: Mapped[str | None] = mapped_column(String, nullable=True)
+    synced_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    # The OSM id of the city itself, e.g. "relation/44915". Unique per trip, so
+    # the same place cannot be added twice. NULL for the seeded destination,
+    # which predates geocoding.
+    osm_ref: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    # Added in 0004. Which country this is, and therefore which Geofabrik
+    # extract covers it. Both nullable: a destination in a country we have no
+    # region for is still usable, it just cannot auto-fill its places.
+    country_code: Mapped[str | None] = mapped_column(String, nullable=True)
+    region: Mapped[str | None] = mapped_column(String, index=True, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -101,6 +187,19 @@ class Destination(Base):
     trip: Mapped[Trip] = relationship(back_populates="destinations")
     places: Mapped[list[Place]] = relationship(
         back_populates="destination", cascade="all, delete-orphan"
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "north > south AND east > west", name="ck_destinations_bbox_ordered"
+        ),
+        CheckConstraint(
+            "sync_state IN ('pending', 'syncing', 'ready', 'failed')",
+            name="ck_destinations_sync_state",
+        ),
+        Index(
+            "ix_destinations_trip_osm_ref", "trip_id", "osm_ref", unique=True
+        ),
     )
 
 
@@ -139,6 +238,15 @@ class Place(Base):
     latitude: Mapped[float | None] = mapped_column(Float, nullable=True)
     longitude: Mapped[float | None] = mapped_column(Float, nullable=True)
 
+    # Added in migration 0002. See PlaceSource above.
+    source: Mapped[str] = mapped_column(
+        String, nullable=False, server_default="manual"
+    )
+    # The OpenStreetMap element id, e.g. "node/1234567". NULL for manual places.
+    # Unique per destination, which is how the same suggestion cannot be saved
+    # twice — see the index in 0002 and the 409 handling in routes.py.
+    source_ref: Mapped[str | None] = mapped_column(String, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -168,4 +276,138 @@ class Place(Base):
             "longitude IS NULL OR (longitude BETWEEN -180 AND 180)",
             name="ck_places_lng_range",
         ),
+        # Added in 0002.
+        CheckConstraint(
+            "source IN ('manual', 'osm')",
+            name="ck_places_source",
+        ),
+        # An OSM place must carry its reference; a manual one must not have one.
+        CheckConstraint(
+            "(source = 'osm') = (source_ref IS NOT NULL)",
+            name="ck_places_source_ref_present",
+        ),
+        # Unique per destination. NULLs do not collide in a Postgres unique
+        # index, so this constrains only real OSM references — see the longer
+        # note in migration 0002.
+        Index(
+            "ix_places_destination_source_ref",
+            "destination_id",
+            "source_ref",
+            unique=True,
+        ),
+    )
+
+
+class OsmPlace(Base):
+    """A place that exists in OpenStreetMap — a cache, not a record.
+
+    The distinction from Place is the whole point:
+
+        Place     you chose this. It is yours. It has must_go. Never deleted
+                  behind your back.
+        OsmPlace  the world happens to contain this. We cached it so the map
+                  can show it. Deleting the whole table costs nothing but a
+                  re-import.
+
+    **Global since migration 0005.** There is no destination_id: one row per
+    OpenStreetMap place, keyed on source_ref, shared by every destination and
+    every client. Previously each destination held its own copy, which meant
+    overlapping cities stored the same café twice and every new destination
+    re-imported data the server already had. Reference data about the world is
+    not per-user data.
+
+    The practical consequence: importing a region once serves everyone, and no
+    client ever downloads anything. The map just queries a rectangle.
+    """
+
+    __tablename__ = "osm_places"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    #: "node/1234567" — globally unique, and the upsert key, which is what makes
+    #: a repeated import update rather than duplicate.
+    source_ref: Mapped[str] = mapped_column(String, nullable=False)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    category: Mapped[str] = mapped_column(String, nullable=False)
+
+    # NOT NULL, unlike Place.latitude: a cached OSM place without a position is
+    # of no use to a map, which is the only thing this table feeds.
+    latitude: Mapped[float] = mapped_column(Float, nullable=False)
+    longitude: Mapped[float] = mapped_column(Float, nullable=False)
+
+    #: Which Geofabrik extract this came from, e.g. "us/new-york". Provenance,
+    #: so a region can be refreshed or dropped wholesale.
+    region: Mapped[str] = mapped_column(String, nullable=False, index=True)
+
+    fetched_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "category IN ('restaurant', 'cafe', 'sight')",
+            name="ck_osm_places_category",
+        ),
+        UniqueConstraint("source_ref", name="uq_osm_places_source_ref"),
+        # The index behind every viewport query. latitude leads and Postgres
+        # range-scans it, filtering longitude from the index rows. At very large
+        # scale the answer is PostGIS with a GiST index on a geography column;
+        # this project does not need that yet, and saying so is part of knowing
+        # when it would.
+        Index("ix_osm_places_coords", "latitude", "longitude"),
+    )
+
+
+class OsmExtract(Base):
+    """One downloaded regional OpenStreetMap file.
+
+    This table exists to answer one question cheaply: *have we already got this
+    country?* Adding Porto after Lisbon should cost no download, and without a
+    record of what has been fetched there is no way to know.
+
+    It replaced OsmTile, and the reason is worth keeping in mind. Tiles existed
+    to make a per-request API resumable, because that API failed most of the
+    time. A static file needs no work queue — you fetch it once and parse it.
+    When a dependency changes, the data model built to cope with its weaknesses
+    should go too, rather than lingering as unused tables.
+    """
+
+    __tablename__ = "osm_extracts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    #: Geofabrik path, e.g. "europe/malta". Unique — the whole point.
+    region: Mapped[str] = mapped_column(String, nullable=False)
+    state: Mapped[str] = mapped_column(
+        String, nullable=False, server_default="pending"
+    )
+    #: Places this extract contributed, for telling the user something happened.
+    place_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
+    #: BigInteger because a large extract exceeds the 2^31 an Integer holds.
+    size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    error: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    # Where this region actually is, from the Geofabrik index. Added in 0005 so
+    # the API can tell "nothing is here" apart from "this was never imported" —
+    # an empty map with no explanation is what made two earlier versions of
+    # this feature feel broken. Nullable because the row is created when a
+    # download starts, before the bounds are necessarily known.
+    south: Mapped[float | None] = mapped_column(Float, nullable=True)
+    west: Mapped[float | None] = mapped_column(Float, nullable=True)
+    north: Mapped[float | None] = mapped_column(Float, nullable=True)
+    east: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    imported_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('pending', 'downloading', 'importing', 'ready', 'failed')",
+            name="ck_osm_extracts_state",
+        ),
+        UniqueConstraint("region", name="uq_osm_extracts_region"),
     )

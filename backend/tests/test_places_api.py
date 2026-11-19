@@ -106,3 +106,130 @@ def test_places_without_a_pin(client: TestClient, venice: Destination) -> None:
     # And the rejected place was not saved.
     listed = client.get(f"/api/destinations/{venice.id}/places").json()
     assert [p["name"] for p in listed] == ["Caffè Florian"]
+
+
+def test_a_manual_place_defaults_to_source_manual(
+    client: TestClient, venice: Destination
+) -> None:
+    """A body that says nothing about source still works, as 'manual'.
+
+    This is the compatibility check for migration 0002: the exact POST body the
+    save form sent before source existed must keep working.
+    """
+    response = client.post(
+        f"/api/destinations/{venice.id}/places",
+        json={"name": "Osteria Anice Stellato", "category": "restaurant"},
+    )
+
+    assert response.status_code == 201, response.text
+    assert response.json()["source"] == "manual"
+    assert response.json()["source_ref"] is None
+
+
+def test_save_an_osm_suggestion_and_read_it_back(
+    client: TestClient, venice: Destination
+) -> None:
+    """Saving a map suggestion keeps the OSM reference that identifies it."""
+    response = client.post(
+        f"/api/destinations/{venice.id}/places",
+        json={
+            "name": "Trattoria alla Madonna",
+            "category": "restaurant",
+            "must_go": True,
+            "latitude": PIN_LATITUDE,
+            "longitude": PIN_LONGITUDE,
+            "source": "osm",
+            "source_ref": "node/1234567",
+        },
+    )
+    assert response.status_code == 201, response.text
+
+    places = client.get(f"/api/destinations/{venice.id}/places").json()
+    assert len(places) == 1
+
+    place = places[0]
+    assert place["source"] == "osm"
+    assert place["source_ref"] == "node/1234567"
+    assert place["must_go"] is True
+    assert place["latitude"] == PIN_LATITUDE
+    assert place["longitude"] == PIN_LONGITUDE
+
+
+def test_saving_the_same_osm_place_twice_is_a_conflict(
+    client: TestClient, venice: Destination
+) -> None:
+    """The second save of one OSM place is a 409, enforced by the database.
+
+    ix_places_destination_source_ref (migration 0002) is what refuses it;
+    create_place turns the resulting IntegrityError into a 409 Conflict. 409
+    rather than 400 because the request is well-formed — it just conflicts with
+    what is already there.
+    """
+    body = {
+        "name": "Trattoria alla Madonna",
+        "category": "restaurant",
+        "latitude": PIN_LATITUDE,
+        "longitude": PIN_LONGITUDE,
+        "source": "osm",
+        "source_ref": "node/1234567",
+    }
+
+    assert client.post(f"/api/destinations/{venice.id}/places", json=body).status_code == 201
+
+    second = client.post(f"/api/destinations/{venice.id}/places", json=body)
+    assert second.status_code == 409, second.text
+    assert "already saved" in second.json()["detail"]
+
+    # One row, not two — and the session recovered from the failed commit
+    # (create_place rolls back), so this read still works.
+    places = client.get(f"/api/destinations/{venice.id}/places").json()
+    assert len(places) == 1
+
+
+def test_source_and_source_ref_must_agree(
+    client: TestClient, venice: Destination
+) -> None:
+    """osm without a ref, and manual with one, are both rejected.
+
+    Mirrors ck_places_source_ref_present. Rejected at the schema layer with a
+    422 so the message names the problem; the constraint stands behind it.
+    """
+    missing_ref = client.post(
+        f"/api/destinations/{venice.id}/places",
+        json={"name": "No ref", "category": "cafe", "source": "osm"},
+    )
+    assert missing_ref.status_code == 422, missing_ref.text
+    assert "source_ref" in missing_ref.text
+
+    unexpected_ref = client.post(
+        f"/api/destinations/{venice.id}/places",
+        json={
+            "name": "Hand typed",
+            "category": "cafe",
+            "source": "manual",
+            "source_ref": "node/999",
+        },
+    )
+    assert unexpected_ref.status_code == 422, unexpected_ref.text
+
+    assert client.get(f"/api/destinations/{venice.id}/places").json() == []
+
+
+def test_two_manual_places_do_not_collide_on_null_source_ref(
+    client: TestClient, venice: Destination
+) -> None:
+    """Many manual places coexist despite the unique index.
+
+    This is the Postgres NULL rule from migration 0002 made concrete: a unique
+    index treats NULLs as distinct, so every manual place has source_ref NULL
+    and none of them conflict. Worth a test precisely because most people
+    expect the opposite and add a partial index they do not need.
+    """
+    for name in ("First", "Second", "Third"):
+        response = client.post(
+            f"/api/destinations/{venice.id}/places",
+            json={"name": name, "category": "cafe"},
+        )
+        assert response.status_code == 201, response.text
+
+    assert len(client.get(f"/api/destinations/{venice.id}/places").json()) == 3
