@@ -15,23 +15,26 @@ import { AddPlaceForm } from "./AddPlaceForm";
 import { fetchPlaces } from "./api";
 import { MapView } from "./MapView";
 import { PlaceList } from "./PlaceList";
-import type { Destination, Place } from "./types";
+import type { DestinationDetail, Place } from "./types";
 
 interface DestinationPageProps {
-  destination: Destination;
-  tripName: string;
+  /** The full detail, not the summary: the map needs the stored bounds and the
+   *  Map view needs sync_state to word its empty message correctly. */
+  destination: DestinationDetail;
 }
 
 type View = "places" | "map";
 
-export function DestinationPage({
-  destination,
-  tripName,
-}: DestinationPageProps) {
+export function DestinationPage({ destination }: DestinationPageProps) {
   const [places, setPlaces] = useState<Place[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [view, setView] = useState<View>("places");
+
+  // Which place the map should fly to. Lives here, not in MapView, because it
+  // is set by the *list* and consumed by the *map* — the nearest common parent
+  // is the only place both can reach.
+  const [focusedPlaceId, setFocusedPlaceId] = useState<number | null>(null);
 
   // This effect is why a refresh keeps your places: on mount, state starts
   // empty and is filled from the database. Nothing is cached in the browser —
@@ -81,12 +84,21 @@ export function DestinationPage({
     setPlaces((current) => [place, ...current]);
   }
 
+  /**
+   * Called by PlaceList when a pinned place is clicked.
+   *
+   * Switching view and setting the target are one action, so they are one
+   * function. React batches both updates into a single render, so the map
+   * mounts already knowing where to fly.
+   */
+  function handleFocusPlace(placeId: number) {
+    setFocusedPlaceId(placeId);
+    setView("map");
+  }
+
   return (
-    <main className="page">
-      <header className="page__header">
-        <p className="page__trip">{tripName}</p>
-        <h1 className="page__title">{destination.name}</h1>
-      </header>
+    <section>
+      <h1 className="page__title">{destination.name}</h1>
 
       <AddPlaceForm destination={destination} onSaved={handleSaved} />
 
@@ -139,15 +151,24 @@ export function DestinationPage({
         {!loading &&
           loadError === null &&
           (view === "places" ? (
-            <PlaceList places={places} destinationName={destination.name} />
+            <PlaceList
+              places={places}
+              destinationName={destination.name}
+              onFocusPlace={handleFocusPlace}
+            />
           ) : (
             <MapView
               places={places}
               destination={destination}
               onShowList={() => setView("places")}
+              // Suggestions saved from a map popup go into the same state as
+              // a manual save, which is what makes the saved marker replace
+              // the suggestion with no extra wiring.
+              onSaved={handleSaved}
+              focusedPlaceId={focusedPlaceId}
             />
           ))}
       </div>
-    </main>
+    </section>
   );
 }

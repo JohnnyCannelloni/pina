@@ -64,3 +64,59 @@ export const draftIcon = L.divIcon({
   iconAnchor: [12, 34],
   popupAnchor: [0, -32],
 });
+
+/**
+ * Markers for OpenStreetMap suggestions — places you have *not* saved.
+ *
+ * Deliberately a different *shape* from the saved pins: a small hollow circle
+ * rather than a filled teardrop. That matters for two reasons. A suggestion is
+ * not yours yet, so it should read as lighter and provisional; and when fifty
+ * of them load at once, a dense field of small circles stays legible in a way
+ * that fifty full-size pins does not.
+ *
+ * The category glyph goes inside, so you can tell a café from a sight without
+ * clicking. Shape plus glyph, never colour alone — the whole legend has to work
+ * for a colour-blind user and in a greyscale screenshot.
+ */
+const SUGGESTION_GLYPHS: Record<string, string> = {
+  restaurant: "🍝",
+  cafe: "☕",
+  sight: "🏛",
+};
+
+/**
+ * A bubble showing how many places are in one grid cell.
+ *
+ * Sized by magnitude rather than linearly: cell counts in a city span three
+ * orders of magnitude (a handful in a suburb, nearly a thousand in a centre),
+ * so a linear radius would make everything either a dot or a blob. Bucketing by
+ * digit count keeps all of them legible and still ranks them visually.
+ */
+export function clusterIcon(count: number): L.DivIcon {
+  const size = count >= 1000 ? 56 : count >= 100 ? 46 : count >= 10 ? 38 : 30;
+  // 1.2k rather than 1204: the exact number is noise at this zoom, and a long
+  // string would overflow the bubble.
+  const label = count >= 1000 ? `${(count / 1000).toFixed(1)}k` : String(count);
+
+  return L.divIcon({
+    html: `<span class="pina-cluster__count">${label}</span>`,
+    className: "pina-marker pina-cluster",
+    iconSize: [size, size],
+    // Centre-anchored: a circle's coordinate is its middle, not its base.
+    iconAnchor: [size / 2, size / 2],
+  });
+}
+
+export function suggestionIcon(category: string): L.DivIcon {
+  const glyph = SUGGESTION_GLYPHS[category] ?? "•";
+  return L.divIcon({
+    html: `<span class="pina-suggestion__glyph">${glyph}</span>`,
+    className: "pina-marker pina-suggestion",
+    iconSize: [26, 26],
+    // Centre-anchored, not bottom-anchored like the teardrop pins: a circle's
+    // coordinate is its middle. Using [13, 26] here would float every
+    // suggestion half a marker north of where it actually is.
+    iconAnchor: [13, 13],
+    popupAnchor: [0, -14],
+  });
+}

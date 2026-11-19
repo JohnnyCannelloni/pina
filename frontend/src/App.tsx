@@ -13,7 +13,7 @@
 import { useEffect, useState } from "react";
 
 import { fetchTrips } from "./api";
-import { DestinationPage } from "./DestinationPage";
+import { TripPage } from "./TripPage";
 import type { Trip } from "./types";
 
 export function App() {
@@ -73,11 +73,9 @@ export function App() {
     );
   }
 
-  const destination = trip?.destinations[0];
-
   // Reached when the migration has run but `python -m app.seed` has not. Naming
   // the exact command is more useful than "no data found".
-  if (!trip || !destination) {
+  if (!trip) {
     return (
       <main className="page">
         <div className="empty" role="status">
@@ -91,5 +89,7 @@ export function App() {
     );
   }
 
-  return <DestinationPage destination={destination} tripName={trip.name} />;
+  // A trip with no destinations is now a normal state, not an error — TripPage
+  // handles it with an empty state and the add form.
+  return <TripPage trip={trip} />;
 }

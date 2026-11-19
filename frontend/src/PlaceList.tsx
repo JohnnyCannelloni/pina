@@ -1,9 +1,13 @@
 /**
- * The Places view: every saved place, pinned or not.
+ * The Places view: every saved place, pinned or not, unfiltered.
  *
- * This list is the complete record. The map shows a subset (only places with
- * coordinates), so anything saved without a pin is still findable here — which
- * is why the map view links back to this one.
+ * This list is the complete record — the map's category chips do not apply
+ * here. That is deliberate: a hidden row in a list gives no visual hint that
+ * anything is missing, whereas a hidden marker on a map is obvious from the
+ * chip state. So the list stays the reliable answer to "where did my place go?".
+ *
+ * A pinned place is a button that sends the map to it. An unpinned one is not,
+ * because there is nowhere to fly to.
  */
 
 import { CATEGORY_ICONS, CATEGORY_LABELS, type Place } from "./types";
@@ -11,15 +15,23 @@ import { CATEGORY_ICONS, CATEGORY_LABELS, type Place } from "./types";
 interface PlaceListProps {
   places: Place[];
   destinationName: string;
+  /** Switches to the Map view, pans to this place and opens its popup. */
+  onFocusPlace: (placeId: number) => void;
 }
 
-export function PlaceList({ places, destinationName }: PlaceListProps) {
+export function PlaceList({
+  places,
+  destinationName,
+  onFocusPlace,
+}: PlaceListProps) {
   if (places.length === 0) {
     return (
       <div className="empty" role="status">
         <p className="empty__title">No places saved for {destinationName} yet.</p>
         <p className="empty__hint">
-          Add your first one above — a name and a category is all it takes.
+          Add one above, or open the Map and press{" "}
+          <strong>Search this area</strong> to find places near{" "}
+          {destinationName}.
         </p>
       </div>
     );
@@ -27,31 +39,52 @@ export function PlaceList({ places, destinationName }: PlaceListProps) {
 
   return (
     <ul className="places">
-      {places.map((place) => (
-        <li key={place.id} className="place">
-          <span className="place__icon" aria-hidden="true">
-            {CATEGORY_ICONS[place.category]}
-          </span>
-
-          <div className="place__body">
-            <span className="place__name">{place.name}</span>
-            <span className="place__meta">
-              {CATEGORY_LABELS[place.category]}
-              {/* Showing pin status in the list answers "why isn't this on the
-                  map?" without the user having to switch views and count. */}
-              {place.latitude === null && (
-                <span className="place__nopin"> · no pin</span>
-              )}
+      {places.map((place) => {
+        const content = (
+          <>
+            <span className="place__icon" aria-hidden="true">
+              {CATEGORY_ICONS[place.category]}
             </span>
-          </div>
 
-          {place.must_go && (
-            // A text label, not only a colour or an icon, so the status is
-            // available to a screen reader and in greyscale.
-            <span className="badge badge--must-go">★ Must-go</span>
-          )}
-        </li>
-      ))}
+            <div className="place__body">
+              <span className="place__name">{place.name}</span>
+              <span className="place__meta">
+                {CATEGORY_LABELS[place.category]}
+                {place.latitude === null ? (
+                  <span className="place__nopin"> · no pin</span>
+                ) : (
+                  <span className="place__showmap"> · show on map</span>
+                )}
+              </span>
+            </div>
+
+            {place.must_go && (
+              // A text label, not only a colour or an icon, so the status is
+              // available to a screen reader and in greyscale.
+              <span className="badge badge--must-go">★ Must-go</span>
+            )}
+          </>
+        );
+
+        return (
+          <li key={place.id}>
+            {place.latitude === null ? (
+              // A div, not a disabled button: there is no action here, and a
+              // disabled button would still be announced as an unavailable
+              // control rather than as plain content.
+              <div className="place">{content}</div>
+            ) : (
+              <button
+                type="button"
+                className="place place--clickable"
+                onClick={() => onFocusPlace(place.id)}
+              >
+                {content}
+              </button>
+            )}
+          </li>
+        );
+      })}
     </ul>
   );
 }

@@ -5,9 +5,13 @@ alembic==1.14.0
 # psycopg 3 ("psycopg"), not the older psycopg2. [binary] ships a prebuilt
 # wheel so there is no need for a local libpq / compiler toolchain.
 psycopg[binary]==3.2.3
+# Reads Geofabrik .osm.pbf extracts. Prebuilt wheels, no compiler needed.
+osmium==4.3.2
 pydantic==2.10.4
 pydantic-settings==2.7.0
+# Used two ways: app/extract.py streams Geofabrik downloads with it, and
+# FastAPI's TestClient is built on it.
+httpx==0.28.1
 
 # Tests
 pytest==8.3.4
-httpx==0.28.1
