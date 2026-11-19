@@ -28,6 +28,7 @@ import { CategoryFilter } from "./CategoryFilter";
 import { ClusterMarkers } from "./ClusterMarkers";
 import { mustGoIcon, placeIcon } from "./leafletIcons";
 import { MapLegend } from "./MapLegend";
+import { PhotosLink } from "./PhotosLink";
 import {
   CITY_ZOOM,
   LABEL_ZOOM,
@@ -347,6 +348,11 @@ export function MapView({
               >
                 {place.must_go ? "★ Must-go" : "Not marked must-go"}
               </span>
+              <PhotosLink
+                name={place.name}
+                near={destination.name}
+                className="popup__photos"
+              />
             </Popup>
           </Marker>
         ))}

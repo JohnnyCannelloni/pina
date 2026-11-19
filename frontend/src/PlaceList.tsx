@@ -10,6 +10,7 @@
  * because there is nowhere to fly to.
  */
 
+import { PhotosLink } from "./PhotosLink";
 import { CATEGORY_ICONS, CATEGORY_LABELS, type Place } from "./types";
 
 interface PlaceListProps {
@@ -88,18 +89,21 @@ export function PlaceList({
                 {content}
               </button>
             )}
-            <button
-              type="button"
-              className="linkbutton place__delete"
-              aria-label={`Delete ${place.name}`}
-              onClick={() => {
-                if (window.confirm(`Delete ${place.name}?`)) {
-                  onDeletePlace(place.id);
-                }
-              }}
-            >
-              Delete
-            </button>
+            <div className="place__actions">
+              <PhotosLink name={place.name} near={destinationName} />
+              <button
+                type="button"
+                className="linkbutton place__delete"
+                aria-label={`Delete ${place.name}`}
+                onClick={() => {
+                  if (window.confirm(`Delete ${place.name}?`)) {
+                    onDeletePlace(place.id);
+                  }
+                }}
+              >
+                Delete
+              </button>
+            </div>
           </li>
         );
       })}

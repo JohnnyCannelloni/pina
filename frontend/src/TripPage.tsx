@@ -118,8 +118,6 @@ export function TripPage({ trip }: TripPageProps) {
   return (
     <main className="page">
       <header className="page__header">
-        <p className="page__trip">{trip.name}</p>
-
         {destinations.length > 1 && (
           <nav className="destinations" aria-label="Destinations">
             {destinations.map((destination) => (
