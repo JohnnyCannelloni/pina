@@ -18,6 +18,7 @@ import { Marker, Popup, Tooltip } from "react-leaflet";
 
 import { createPlace } from "./api";
 import { suggestionIcon } from "./leafletIcons";
+import { PhotosLink } from "./PhotosLink";
 import { CATEGORY_LABELS, type Place, type Suggestion } from "./types";
 
 interface SuggestionMarkersProps {
@@ -110,6 +111,11 @@ function SuggestionMarker({
         <span className="popup__meta">
           {CATEGORY_LABELS[suggestion.category]} · from OpenStreetMap
         </span>
+        <PhotosLink
+          name={suggestion.name}
+          near={destinationName}
+          className="popup__photos"
+        />
 
         {/* The detected category is shown before you save, rather than being
             applied silently, because the OSM tag we mapped from is sometimes

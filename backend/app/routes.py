@@ -4,9 +4,11 @@
     GET  /api/geocode?q=                       find a city to add
     POST /api/trips/{id}/destinations          add a destination, start its sync
     GET  /api/destinations/{id}                destination + sync progress
+    DELETE /api/destinations/{id}              remove it and its saved places
     POST /api/destinations/{id}/sync           re-run / resume the sync
     GET  /api/destinations/{id}/places         your saved collection
     POST /api/destinations/{id}/places         save a place
+    DELETE /api/destinations/{id}/places/{pid} remove a saved place
     GET  /api/destinations/{id}/nearby         cached OSM places you could save
 
 Note what `nearby` is now: a plain indexed SELECT against our own osm_places
@@ -63,7 +65,7 @@ from app.schemas import (
     Suggestion,
     TripRead,
 )
-from app.sync import clamp_area, get_sync_runner
+from app.sync import cancel_download, clamp_area, get_sync_runner
 
 router = APIRouter(prefix="/api")
 
@@ -222,6 +224,35 @@ def create_place(
     # drop the real record — with its real id — straight into state, so the new
     # place and its pin appear without a second round trip.
     return place
+
+
+@router.delete(
+    "/destinations/{destination_id}/places/{place_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def delete_place(
+    destination_id: int,
+    place_id: int,
+    db: Session = Depends(get_db),
+) -> None:
+    """Remove one place from your collection.
+
+    Only touches `places`. The OpenStreetMap cache is untouched, so a place
+    saved from a map suggestion simply becomes a suggestion again.
+    """
+    _get_destination_or_404(db, destination_id)
+
+    place = db.get(Place, place_id)
+    # The destination check matters: without it, any place id could be deleted
+    # through any destination's URL.
+    if place is None or place.destination_id != destination_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Place {place_id} not found in destination {destination_id}",
+        )
+
+    db.delete(place)
+    db.commit()
 
 
 def get_bounding_box(
@@ -604,6 +635,41 @@ def get_destination(
     """A destination with its sync progress. The UI polls this while syncing."""
     destination = _get_destination_or_404(db, destination_id)
     return _destination_detail(db, destination)
+
+
+@router.delete(
+    "/destinations/{destination_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def delete_destination(destination_id: int, db: Session = Depends(get_db)) -> None:
+    """Remove a destination and the places saved to it.
+
+    Saved places go with it: the relationship's delete-orphan cascade (and
+    ON DELETE CASCADE underneath) removes them in the same transaction.
+
+    The downloaded map data is deliberately kept. osm_places and osm_extracts
+    are a global cache shared by every destination in the region, so re-adding
+    the city — or adding a neighbour — fills instantly with no new download.
+
+    **A running download is cancelled** when this was the last destination in
+    its region — otherwise deleting a city added by mistake would still pull
+    down hundreds of megabytes nobody wants. If another destination shares the
+    region, the download carries on for it.
+    """
+    destination = _get_destination_or_404(db, destination_id)
+    region = destination.region
+
+    db.delete(destination)
+    db.commit()
+
+    if region is not None:
+        still_needed = db.scalar(
+            select(func.count())
+            .select_from(Destination)
+            .where(Destination.region == region)
+        )
+        if not still_needed:
+            cancel_download(region)
 
 
 @router.post("/destinations/{destination_id}/sync", response_model=DestinationDetail)

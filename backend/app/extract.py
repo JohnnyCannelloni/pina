@@ -32,6 +32,7 @@ to fetch a dozen.
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -79,6 +80,15 @@ class ExtractError(RuntimeError):
     """The extract could not be downloaded or parsed."""
 
 
+class ExtractCancelled(Exception):
+    """The download was stopped on purpose, because nothing needs it any more.
+
+    Deliberately *not* an ExtractError. A failure is recorded and offered for
+    retry; a cancellation is the user's intent, and must not show up as
+    "Some places could not be loaded".
+    """
+
+
 def cache_dir() -> Path:
     """Where downloaded extracts live.
 
@@ -96,10 +106,19 @@ def extract_path(region: str) -> Path:
     return cache_dir() / f"{region.replace('/', '_')}-latest.osm.pbf"
 
 
-def download_extract(region: str, force: bool = False) -> Path:
+def download_extract(
+    region: str,
+    force: bool = False,
+    cancel: threading.Event | None = None,
+) -> Path:
     """Fetch a region's extract, resuming or reusing where possible.
 
     Returns the local path. Raises ExtractError on failure.
+
+    `cancel` is checked once per chunk (1 MB), so setting it stops a download
+    within a second or so. A cancelled download deletes its `.part` file — the
+    point of cancelling is not to leave several hundred megabytes behind — and
+    raises ExtractCancelled.
     """
     target = extract_path(region)
     partial = target.with_suffix(target.suffix + ".part")
@@ -156,6 +175,8 @@ def download_extract(region: str, force: bool = False) -> Path:
 
             with partial.open(mode) as handle:
                 for chunk in response.iter_bytes(chunk_size=1 << 20):
+                    if cancel is not None and cancel.is_set():
+                        raise ExtractCancelled(f"Download of {region} cancelled.")
                     handle.write(chunk)
                     written += len(chunk)
                     if written >= next_log:
@@ -163,6 +184,11 @@ def download_extract(region: str, force: bool = False) -> Path:
                             "%s: %.0f MB downloaded", region, written / 1_048_576
                         )
                         next_log = written + LOG_EVERY_BYTES
+    except ExtractCancelled:
+        # Both `with` blocks have closed the file and the connection by now.
+        partial.unlink(missing_ok=True)
+        logger.info("download of %s cancelled; partial file removed", region)
+        raise
     except httpx.TimeoutException as exc:
         raise ExtractError(
             "The download timed out. It resumes where it left off, so "

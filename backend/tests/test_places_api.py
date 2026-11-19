@@ -233,3 +233,62 @@ def test_two_manual_places_do_not_collide_on_null_source_ref(
         assert response.status_code == 201, response.text
 
     assert len(client.get(f"/api/destinations/{venice.id}/places").json()) == 3
+
+
+# --- deleting ---------------------------------------------------------------
+
+
+def test_delete_a_place(client: TestClient, venice: Destination) -> None:
+    """Delete removes the row; a fresh read no longer returns it."""
+    created = client.post(
+        f"/api/destinations/{venice.id}/places",
+        json={"name": "Caffè Florian", "category": "cafe"},
+    ).json()
+
+    response = client.delete(f"/api/destinations/{venice.id}/places/{created['id']}")
+    assert response.status_code == 204, response.text
+    assert response.content == b""
+
+    assert client.get(f"/api/destinations/{venice.id}/places").json() == []
+
+
+def test_delete_an_unknown_place_is_a_404(
+    client: TestClient, venice: Destination
+) -> None:
+    response = client.delete(f"/api/destinations/{venice.id}/places/999999")
+    assert response.status_code == 404, response.text
+
+
+def test_delete_through_the_wrong_destination_is_a_404(
+    client: TestClient, venice: Destination
+) -> None:
+    """A place id is only deletable through the destination it belongs to."""
+    created = client.post(
+        f"/api/destinations/{venice.id}/places",
+        json={"name": "Caffè Florian", "category": "cafe"},
+    ).json()
+
+    response = client.delete(f"/api/destinations/999999/places/{created['id']}")
+    assert response.status_code == 404, response.text
+
+    # Still there.
+    assert len(client.get(f"/api/destinations/{venice.id}/places").json()) == 1
+
+
+def test_a_deleted_osm_place_can_be_saved_again(
+    client: TestClient, venice: Destination
+) -> None:
+    """Deleting frees the (destination, source_ref) slot, so no 409 on re-save."""
+    body = {
+        "name": "Trattoria alla Madonna",
+        "category": "restaurant",
+        "latitude": PIN_LATITUDE,
+        "longitude": PIN_LONGITUDE,
+        "source": "osm",
+        "source_ref": "node/1234567",
+    }
+    created = client.post(f"/api/destinations/{venice.id}/places", json=body).json()
+    client.delete(f"/api/destinations/{venice.id}/places/{created['id']}")
+
+    response = client.post(f"/api/destinations/{venice.id}/places", json=body)
+    assert response.status_code == 201, response.text

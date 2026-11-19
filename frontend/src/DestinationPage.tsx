@@ -12,7 +12,7 @@
 import { useEffect, useState } from "react";
 
 import { AddPlaceForm } from "./AddPlaceForm";
-import { fetchPlaces } from "./api";
+import { deletePlace, fetchPlaces } from "./api";
 import { MapView } from "./MapView";
 import { PlaceList } from "./PlaceList";
 import type { DestinationDetail, Place } from "./types";
@@ -21,11 +21,16 @@ interface DestinationPageProps {
   /** The full detail, not the summary: the map needs the stored bounds and the
    *  Map view needs sync_state to word its empty message correctly. */
   destination: DestinationDetail;
+  /** Deletes this destination. Called only after the user has confirmed. */
+  onDelete: (destinationId: number) => void;
 }
 
 type View = "places" | "map";
 
-export function DestinationPage({ destination }: DestinationPageProps) {
+export function DestinationPage({
+  destination,
+  onDelete,
+}: DestinationPageProps) {
   const [places, setPlaces] = useState<Place[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -85,6 +90,28 @@ export function DestinationPage({ destination }: DestinationPageProps) {
   }
 
   /**
+   * Called by PlaceList once the user has confirmed a delete.
+   *
+   * Removed from state only after the API succeeds, so a failed delete cannot
+   * make a place vanish from the screen while it is still in the database.
+   * Both views read this one array, so the list row and the map pin go
+   * together.
+   */
+  async function handleDeletePlace(placeId: number) {
+    try {
+      await deletePlace(destination.id, placeId);
+      setPlaces((current) => current.filter((place) => place.id !== placeId));
+      if (focusedPlaceId === placeId) {
+        setFocusedPlaceId(null);
+      }
+    } catch (caught) {
+      window.alert(
+        caught instanceof Error ? caught.message : "Could not delete the place.",
+      );
+    }
+  }
+
+  /**
    * Called by PlaceList when a pinned place is clicked.
    *
    * Switching view and setting the target are one action, so they are one
@@ -98,7 +125,27 @@ export function DestinationPage({ destination }: DestinationPageProps) {
 
   return (
     <section>
-      <h1 className="page__title">{destination.name}</h1>
+      <div className="page__titlerow">
+        <h1 className="page__title">{destination.name}</h1>
+        <button
+          type="button"
+          className="linkbutton destination__delete"
+          onClick={() => {
+            // The confirm is here because this component knows how many
+            // places would go with it — the number worth warning about.
+            const count = places.length;
+            const also =
+              count > 0
+                ? ` This also deletes ${count} saved place${count === 1 ? "" : "s"}.`
+                : "";
+            if (window.confirm(`Delete ${destination.name}?${also}`)) {
+              onDelete(destination.id);
+            }
+          }}
+        >
+          Delete destination
+        </button>
+      </div>
 
       <AddPlaceForm destination={destination} onSaved={handleSaved} />
 
@@ -155,6 +202,7 @@ export function DestinationPage({ destination }: DestinationPageProps) {
               places={places}
               destinationName={destination.name}
               onFocusPlace={handleFocusPlace}
+              onDeletePlace={handleDeletePlace}
             />
           ) : (
             <MapView
