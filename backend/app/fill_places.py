@@ -1,17 +1,12 @@
-"""CLI for filling a destination's places outside a web request.
+"""fill places from the command line instead of a web request.
 
     python -m app.fill_places --destination 1
     python -m app.fill_places --all
     python -m app.fill_places --list
+    python -m app.fill_places --region portugal
 
-Why this exists alongside the automatic background fill: the first destination
-in a country needs its whole national extract, which for somewhere like Italy
-is well over a gigabyte. That is a fine thing to run from a terminal where you
-can watch it and nothing times out, and a poor thing to start from a web
-request. Later cities in the same country are filled in seconds either way.
-
-It calls the same `sync_destination` the API does — not a parallel
-implementation — so anything proved here is true of the automatic path.
+useful for big first downloads you want to watch. uses the same
+sync_destination as the api.
 """
 
 from __future__ import annotations
@@ -20,6 +15,7 @@ import argparse
 import logging
 
 from sqlalchemy import func, select
+from sqlalchemy.orm import Session
 
 from app.db import SessionLocal
 from app.extract import download_extract, extract_state, import_extract
@@ -35,8 +31,25 @@ from app.regions import candidates_for, find_region
 from app.sync import sync_destination
 
 
+def _cached_count(db: Session, destination: Destination) -> int:
+    """cached osm places inside a destination's area.
+
+    osm_places is global, so this counts by area rather than by foreign key.
+    """
+    return db.scalar(
+        select(func.count())
+        .select_from(OsmPlace)
+        .where(
+            OsmPlace.latitude >= destination.south,
+            OsmPlace.latitude <= destination.north,
+            OsmPlace.longitude >= destination.west,
+            OsmPlace.longitude <= destination.east,
+        )
+    ) or 0
+
+
 def _list_destinations() -> None:
-    """Show every destination and how full its place cache is."""
+    """print every destination and how many cached places fall inside it."""
     with SessionLocal() as db:
         rows = list(db.scalars(select(Destination).order_by(Destination.id)))
         if not rows:
@@ -45,19 +58,7 @@ def _list_destinations() -> None:
 
         print(f"{'id':>3}  {'name':<24} {'state':<9} {'places':>7}  region")
         for destination in rows:
-            # Counted by the destination's own area, not by a foreign key:
-            # osm_places is global since 0005, so "how many places does this
-            # destination have" is a geographic question now.
-            cached = db.scalar(
-                select(func.count())
-                .select_from(OsmPlace)
-                .where(
-                    OsmPlace.latitude >= destination.south,
-                    OsmPlace.latitude <= destination.north,
-                    OsmPlace.longitude >= destination.west,
-                    OsmPlace.longitude <= destination.east,
-                )
-            ) or 0
+            cached = _cached_count(db, destination)
             print(
                 f"{destination.id:>3}  {destination.name[:24]:<24} "
                 f"{destination.sync_state:<9} {cached:>7}  "
@@ -66,12 +67,9 @@ def _list_destinations() -> None:
 
 
 def _list_regions_near(query: str) -> None:
-    """Show which Geofabrik regions cover a place, smallest first.
+    """print the geofabrik regions covering a place, smallest first.
 
-    Prints the alternatives as well as the winner, because that is how you would
-    spot a bad resolution. A bounding-box version of this lookup put New York
-    City in New Jersey and Lisbon in Spain; seeing the runners-up is what makes
-    such a mistake obvious instead of invisible.
+    shows the runners-up too, which makes a wrong pick easy to spot.
     """
     results = get_geocoder().search(query)
     if not results:
@@ -97,11 +95,9 @@ def _list_regions_near(query: str) -> None:
 
 
 def _import_region(region_id: str) -> bool:
-    """Download and import one region. The operator entry point.
+    """download and import one region.
 
-    Separate from --destination because on a hosted deployment this is the only
-    way data gets in: clients never trigger a download. See AUTO_IMPORT_REGIONS
-    in app/config.py.
+    the only way data gets in when AUTO_IMPORT_REGIONS is off.
     """
     try:
         region = find_region(region_id)
@@ -142,11 +138,7 @@ def _import_region(region_id: str) -> bool:
 
 
 def _warn_about_size(destination_id: int) -> None:
-    """Tell the user up front if this will be a large download.
-
-    A 1.7 GB download that starts with no warning looks like a hang. Saying so
-    first is the difference between waiting and killing the process.
-    """
+    """warn before a first-time region download, so it doesn't look like a hang."""
     with SessionLocal() as db:
         destination = db.get(Destination, destination_id)
         if destination is None or not destination.region:
@@ -189,8 +181,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # Logging on by default: this command's whole value is that you can watch a
-    # long download, so hiding progress would defeat the point.
+    # on by default so long downloads show progress.
     logging.basicConfig(
         level=logging.WARNING if args.quiet else logging.INFO,
         format="%(levelname)s %(name)s: %(message)s",
@@ -233,11 +224,8 @@ def main() -> None:
 
         with SessionLocal() as db:
             destination = db.get(Destination, destination_id)
-            cached = db.scalar(
-                select(func.count())
-                .select_from(OsmPlace)
-                .where(OsmPlace.destination_id == destination_id)
-            ) or 0
+            # the destination may have been deleted while it synced.
+            cached = _cached_count(db, destination) if destination else 0
             state = destination.sync_state if destination else "missing"
             error = destination.sync_error if destination else None
 
@@ -247,8 +235,6 @@ def main() -> None:
             print(f"  {state}: {error or 'see the log above'}")
             failures += 1
 
-    # Non-zero exit on failure, so this is usable in a script and the outcome is
-    # unambiguous rather than buried in the output.
     if failures:
         raise SystemExit(1)
 
