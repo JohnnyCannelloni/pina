@@ -63,6 +63,30 @@ export function DestinationPage({
     viewport.current = bounds;
   }, []);
 
+  // "Show on map" has to *take you* to the map, not just switch the tab: the
+  // map sits below the Ask results, often off-screen. A counter rather than a
+  // boolean, so asking twice in a row scrolls twice.
+  const viewCard = useRef<HTMLDivElement>(null);
+  const [scrollRequest, setScrollRequest] = useState(0);
+  useEffect(() => {
+    if (scrollRequest === 0) {
+      return;
+    }
+    const reduceMotion = window.matchMedia(
+      "(prefers-reduced-motion: reduce)",
+    ).matches;
+    viewCard.current?.scrollIntoView({
+      behavior: reduceMotion ? "auto" : "smooth",
+      block: "start",
+    });
+  }, [scrollRequest]);
+
+  /** Switch to the map and bring it on screen. */
+  function goToMap() {
+    setView("map");
+    setScrollRequest((count) => count + 1);
+  }
+
   // A different destination starts with no answer — Lisbon's results have no
   // business on New York's map.
   useEffect(() => {
@@ -149,7 +173,7 @@ export function DestinationPage({
    */
   function handleFocusPlace(placeId: number) {
     setFocusedPlaceId(placeId);
-    setView("map");
+    goToMap();
   }
 
   function handleAnswer(answer: AskResponse | null) {
@@ -167,7 +191,7 @@ export function DestinationPage({
       return;
     }
     setFocusedRef(result.source_ref);
-    setView("map");
+    goToMap();
   }
 
   return (
@@ -210,7 +234,7 @@ export function DestinationPage({
 
       <AddPlaceForm destination={destination} onSaved={handleSaved} />
 
-      <div className="card">
+      <div className="card" ref={viewCard}>
         {/* role="tablist" + aria-selected tells a screen reader this is a view
             switcher, not two unrelated buttons. */}
         <div className="toggle" role="tablist" aria-label="View">

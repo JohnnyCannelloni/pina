@@ -83,6 +83,9 @@ body {
   border-radius: var(--radius);
   padding: 1rem;
   margin-bottom: 1rem;
+  /* Room above a card that "Show on map" scrolls to, so it does not land
+     flush against the top of the window. */
+  scroll-margin-top: 1rem;
 }
 
 /* --- Ask Pina ----------------------------------------------------------- */
