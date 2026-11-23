@@ -1,13 +1,6 @@
 /**
- * The Places view: every saved place, pinned or not, unfiltered.
- *
- * This list is the complete record — the map's category chips do not apply
- * here. That is deliberate: a hidden row in a list gives no visual hint that
- * anything is missing, whereas a hidden marker on a map is obvious from the
- * chip state. So the list stays the reliable answer to "where did my place go?".
- *
- * A pinned place is a button that sends the map to it. An unpinned one is not,
- * because there is nowhere to fly to.
+ * the places view: every saved place, unfiltered (the map's category chips
+ * don't apply here). pinned rows fly to the map; unpinned rows aren't buttons.
  */
 
 import { PhotosLink } from "./PhotosLink";
@@ -21,9 +14,9 @@ import {
 interface PlaceListProps {
   places: Place[];
   destinationName: string;
-  /** Switches to the Map view, pans to this place and opens its popup. */
+  /** switch to the map, pan to this place and open its popup. */
   onFocusPlace: (placeId: number) => void;
-  /** Deletes the place. Called only after the user has confirmed. */
+  /** delete the place. only called after the user confirms. */
   onDeletePlace: (placeId: number) => void;
 }
 
@@ -59,8 +52,7 @@ export function PlaceList({
               <span className="place__name">{place.name}</span>
               <span className="place__meta">
                 {CATEGORY_LABELS[place.category]}
-                {/* Just the cuisine: a list row stays one glance long. Hours,
-                    website and phone are in the map popup. */}
+                {/* just the cuisine; hours and links are in the map popup. */}
                 {place.details && place.details.cuisine.length > 0 &&
                   ` · ${place.details.cuisine.map(formatCuisine).join(", ")}`}
                 {place.latitude === null ? (
@@ -72,22 +64,17 @@ export function PlaceList({
             </div>
 
             {place.must_go && (
-              // A text label, not only a colour or an icon, so the status is
-              // available to a screen reader and in greyscale.
+              // a text label, so it works for screen readers and in greyscale.
               <span className="badge badge--must-go">★ Must-go</span>
             )}
           </>
         );
 
         return (
-          // The Delete button is a *sibling* of the row, not inside it: a
-          // pinned row is itself a <button>, and a button inside a button is
-          // invalid HTML — clicks would also bubble and fly to the map.
+          // actions sit beside the row, since a pinned row is itself a button.
           <li key={place.id} className="places__item">
             {place.latitude === null ? (
-              // A div, not a disabled button: there is no action here, and a
-              // disabled button would still be announced as an unavailable
-              // control rather than as plain content.
+              // a div, not a disabled button: there's no action here.
               <div className="place">{content}</div>
             ) : (
               <button

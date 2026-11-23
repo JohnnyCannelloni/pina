@@ -1,15 +1,6 @@
 /**
- * Every call to the backend goes through here.
- *
- * The one rule this file enforces: a non-2xx response **throws**. `fetch` does
- * not do that on its own — it only rejects on a network failure, so a 422 or a
- * 500 arrives as a perfectly ordinary resolved promise with `ok: false`. Code
- * that forgets to check `response.ok` therefore treats a failed save as a
- * success, which is precisely the bug that makes a form silently lose data.
- *
- * Throwing means every caller must either handle the failure or let it bubble,
- * and the component can use one try/catch for both "the API said no" and "the
- * API is not running".
+ * every backend call goes through here. any non-2xx response throws, since
+ * fetch only rejects on network errors.
  */
 
 import type {
@@ -26,11 +17,10 @@ import type {
   Trip,
 } from "./types";
 
-/** Relative, not absolute: Vite proxies /api to localhost:8000 in dev, and the
- *  same path works in production when API and static files share a host. */
+/** relative: vite proxies /api in dev. */
 const BASE_URL = "/api";
 
-/** An error carrying the HTTP status, so callers can distinguish 404 from 500. */
+/** an error carrying the http status. */
 export class ApiError extends Error {
   readonly status: number;
 
@@ -42,13 +32,8 @@ export class ApiError extends Error {
 }
 
 /**
- * Turn a FastAPI error body into one human-readable sentence.
- *
- * FastAPI uses `detail` for both of its error styles, with different types:
- *   - HTTPException  -> detail is a string:  "Destination 9 not found"
- *   - validation 422 -> detail is an array:  [{loc: ["body","name"], msg: ...}]
- * Handling only the first gives the user "[object Object]" the first time they
- * submit something invalid.
+ * one readable message from a fastapi error body. `detail` is a string for
+ * HTTPException and an array of field errors for a 422.
  */
 async function extractErrorMessage(response: Response): Promise<string> {
   try {
@@ -79,8 +64,7 @@ async function extractErrorMessage(response: Response): Promise<string> {
       }
     }
   } catch {
-    // Body was not JSON (a proxy error page, an empty 500). Fall through to the
-    // generic message below rather than masking the real status with a crash.
+    // not json (a proxy error page, an empty 500); use the generic message.
   }
   return `Request failed with status ${response.status}`;
 }
@@ -90,9 +74,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   try {
     response = await fetch(`${BASE_URL}${path}`, init);
   } catch {
-    // fetch rejects only here: DNS failure, connection refused, offline. In
-    // practice while developing, this means uvicorn is not running — so say so,
-    // rather than showing the browser's opaque "Failed to fetch".
+    // fetch only rejects on network failure; locally that means uvicorn is down.
     throw new ApiError(
       "Could not reach the server. Is the backend running on port 8000?",
       0,
@@ -103,8 +85,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiError(await extractErrorMessage(response), response.status);
   }
 
-  // 204 No Content (a DELETE) has an empty body, and response.json() throws
-  // on an empty body — which would turn a successful delete into an error.
+  // 204 has an empty body, which response.json() would choke on.
   if (response.status === 204) {
     return undefined as T;
   }
@@ -112,22 +93,17 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T;
 }
 
-/** GET /api/trips — how the UI discovers Venice's id and map centre. */
+/** GET /api/trips */
 export function fetchTrips(): Promise<Trip[]> {
   return request<Trip[]>("/trips");
 }
 
-/** GET /api/destinations/{id}/places — the single read both views share. */
+/** GET /api/destinations/{id}/places */
 export function fetchPlaces(destinationId: number): Promise<Place[]> {
   return request<Place[]>(`/destinations/${destinationId}/places`);
 }
 
-/**
- * POST /api/destinations/{id}/places — the save.
- *
- * Returns the created place, including the `id` and `created_at` Postgres
- * generated, so the caller can put the real record straight into state.
- */
+/** POST /api/destinations/{id}/places. returns the saved place with its id. */
 export function createPlace(
   destinationId: number,
   place: NewPlace,
@@ -139,12 +115,7 @@ export function createPlace(
   });
 }
 
-/**
- * DELETE /api/destinations/{id}/places/{placeId} — remove a saved place.
- *
- * Only your collection changes; a place saved from the map becomes a
- * suggestion again.
- */
+/** DELETE /api/destinations/{id}/places/{placeId} */
 export function deletePlace(
   destinationId: number,
   placeId: number,
@@ -154,22 +125,13 @@ export function deletePlace(
   });
 }
 
-/**
- * GET /api/destinations/{id}/nearby — what to draw for this viewport.
- *
- * A read of our own indexed table, not a third-party call, which is why it can
- * run on every map movement. Returns either real places or cluster counts
- * depending on how many are in view — see NearbyResponse.
- */
+/** GET /api/destinations/{id}/nearby: places or cluster counts for a viewport. */
 export function fetchNearby(
   destinationId: number,
   bounds: Bounds,
   categories: readonly Category[],
 ): Promise<NearbyResponse> {
-  // URLSearchParams handles the encoding, and `append` called repeatedly is how
-  // you build the ?categories=restaurant&categories=cafe form that FastAPI
-  // parses into a list. A comma-joined single value would arrive as one string
-  // named "restaurant,cafe" and fail validation.
+  // repeated params (?categories=a&categories=b), which fastapi reads as a list.
   const params = new URLSearchParams({
     south: String(bounds.south),
     west: String(bounds.west),
@@ -186,17 +148,14 @@ export function fetchNearby(
 }
 
 /**
- * POST /api/destinations/{id}/ask — Ask Pina.
- *
- * Slow by web standards (5–15 s): a local model reads the question first.
- * `viewport` is the map's current view, sent only while the map is open; the
- * server searches there when the question names no area.
+ * POST /api/destinations/{id}/ask. takes a few seconds with a local model.
+ * `viewport` is sent only while the map is open.
  */
 export function askPina(
   destinationId: number,
   question: string,
   viewport: Bounds | null,
-  /** The search from the previous message, so a follow-up refines it. */
+  /** the previous search, so a follow-up refines it. */
   previous: SearchIntent | null = null,
 ): Promise<AskResponse> {
   return request<AskResponse>(`/destinations/${destinationId}/ask`, {
@@ -206,27 +165,15 @@ export function askPina(
   });
 }
 
-/**
- * GET /api/geocode — candidate destinations for a typed name.
- *
- * Several are returned on purpose: "Venice" exists in Italy, Florida and
- * California, so the user picks. This is the one place a third party is called
- * during an interaction, and it is cheap — one lookup when someone adds a city.
- */
+/** GET /api/geocode: candidate destinations for a typed name. */
 export function geocode(query: string): Promise<GeocodeCandidate[]> {
   const params = new URLSearchParams({ q: query });
   return request<GeocodeCandidate[]>(`/geocode?${params.toString()}`);
 }
 
 /**
- * POST /api/trips/{id}/destinations — add a destination and start its sync.
- *
- * Returns immediately with sync_state 'pending'; fetching its places happens in
- * the background. Poll getDestination to follow it.
- *
- * The chosen candidate is sent back in full rather than just its name, so the
- * destination is built from exactly the place the user picked — re-geocoding
- * server-side could silently resolve to a different one.
+ * POST /api/trips/{id}/destinations. returns straight away as 'pending'; poll
+ * getDestination to follow the sync. sends the picked candidate back in full.
  */
 export function createDestination(
   tripId: number,
@@ -239,28 +186,19 @@ export function createDestination(
   });
 }
 
-/** GET /api/destinations/{id} — destination plus sync progress. */
+/** GET /api/destinations/{id}: destination plus sync progress. */
 export function getDestination(
   destinationId: number,
 ): Promise<DestinationDetail> {
   return request<DestinationDetail>(`/destinations/${destinationId}`);
 }
 
-/**
- * DELETE /api/destinations/{id} — remove a destination and its saved places.
- *
- * The downloaded map data is kept, so re-adding the city fills it instantly.
- */
+/** DELETE /api/destinations/{id}. downloaded map data is kept. */
 export function deleteDestination(destinationId: number): Promise<void> {
   return request<void>(`/destinations/${destinationId}`, { method: "DELETE" });
 }
 
-/**
- * POST /api/destinations/{id}/sync — re-run or resume the place sync.
- *
- * Safe at any time: finished areas are skipped and re-fetched places are
- * updated rather than duplicated. Your saved places are never touched.
- */
+/** POST /api/destinations/{id}/sync: re-run or resume the sync. */
 export function startSync(destinationId: number): Promise<DestinationDetail> {
   return request<DestinationDetail>(`/destinations/${destinationId}/sync`, {
     method: "POST",

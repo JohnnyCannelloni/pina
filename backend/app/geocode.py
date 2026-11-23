@@ -1,24 +1,8 @@
-"""Turning a typed city name into a destination, via Nominatim.
+"""geocoding through nominatim: city names, and areas inside a destination.
 
-One of two outside services Pina uses, and the split between them is about what
-each is *allowed* to be asked for:
-
-    Nominatim  "where is Lisbon?" — one lookup, a few results, on demand.
-               Its usage policy forbids bulk or heavy use and asks for at most
-               one request per second. We call it once per destination a human
-               adds, which is comfortably inside that.
-
-    Geofabrik  "every restaurant in Portugal" — bulk data.
-               A static file download, with no query engine to overload. See
-               app/extract.py.
-
-Using Nominatim for the second job would get us blocked, and deservedly. An
-earlier version of Pina used the Overpass API there instead; it was the right
-*kind* of service but its public instances are busy by default, and the feature
-built on it did not work. The bulk job moved to static files; this one stayed.
-
-Measured: HTTP 200 in 0.45s with accurate results. Answering one geocode is
-cheap, which is why this is the half that was never the problem.
+nominatim's usage policy allows light, on-demand lookups only, so it's called
+once per added destination or ask pina area. bulk place data comes from
+geofabrik instead (app/extract.py).
 """
 
 from __future__ import annotations
@@ -32,27 +16,21 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-#: Nominatim's policy requires a User-Agent identifying the application.
-#: Requests with a default library agent get blocked.
+#: nominatim requires a user agent that identifies the app.
 USER_AGENT = "Pina/0.1 (single-user travel planner; local development)"
 
-#: How many candidates to offer. "Venice" matches Venice, Italy and Venice,
-#: Florida (and Venice Beach), so the user picks — guessing the first result
-#: silently is how you end up planning a trip to the wrong continent.
+#: several candidates, so the user can pick between e.g. venice, italy and
+#: venice, florida.
 MAX_RESULTS = 5
 
 
 @dataclass(frozen=True)
 class GeocodeResult:
-    """A candidate destination.
+    """a candidate place, with its box already in south/west/north/east order."""
 
-    Already in *our* axis order (south/west/north/east), converted from
-    Nominatim's, so nothing downstream has to remember the difference.
-    """
-
-    #: Full label from Nominatim, e.g. "Venice, Veneto, Italy".
+    #: e.g. "Venice, Veneto, Italy".
     display_name: str
-    #: Short label for the destination's name, e.g. "Venice".
+    #: e.g. "Venice".
     name: str
     latitude: float
     longitude: float
@@ -60,42 +38,25 @@ class GeocodeResult:
     west: float
     north: float
     east: float
-    #: "relation/44915" — identity, used to stop one city being added twice.
+    #: e.g. "relation/44915". stops the same city being added twice.
     osm_ref: str
-    #: ISO 3166-1 alpha-2, e.g. "pt". This is what decides which Geofabrik
-    #: extract gets downloaded — see app/regions.py. None when Nominatim does
-    #: not say, in which case the destination works but cannot auto-fill.
+    #: iso 3166-1 alpha-2, e.g. "pt". none when nominatim doesn't say.
     country_code: str | None
-    #: Nominatim's 0-1 estimate of how notable the place is. Its own result
-    #: order is a poor guide for bare names — inside Venice, "Rialto" ranks a
-    #: service road in Marghera (0.04) above the Rialto market (0.17) — so Ask
-    #: Pina picks by this instead.
+    #: nominatim's 0-1 notability score. ask pina picks areas by this, since
+    #: the result order is unreliable for bare names (a "rialto" service road
+    #: outranks the rialto market).
     importance: float = 0.0
 
 
 class GeocodeError(RuntimeError):
-    """Nominatim could not be reached, or did not answer usefully.
-
-    A distinct type so routes.py can map exactly this to a 503 and let genuine
-    bugs in our own code keep surfacing as 500s.
-    """
+    """nominatim couldn't be reached or gave an unusable answer. maps to a 503."""
 
 
 def parse_results(payload: object) -> list[GeocodeResult]:
-    """Convert Nominatim's JSON into GeocodeResults.
+    """convert nominatim's json into GeocodeResults.
 
-    Split out from the HTTP call so it can be tested against a literal payload,
-    and so the two awkward parts of Nominatim's format are isolated in one
-    place:
-
-    1. **`boundingbox` is a list of STRINGS**, not numbers:
-           ["45.4097", "45.4571", "12.2890", "12.3615"]
-    2. **Its order is [min_lat, max_lat, min_lon, max_lon]** — that is
-       south, NORTH, west, east. Every other bounding box in this project is
-       south/west/north/east. Reading it positionally without noticing gives
-       you a box with north and west swapped, which passes a careless eye and
-       then fails ck_destinations_bbox_ordered in the database. Converting here,
-       once, is why nothing else has to know.
+    note that `boundingbox` is a list of strings in [south, north, west, east]
+    order, unlike every other box in this project.
     """
     if not isinstance(payload, list):
         raise GeocodeError("Unexpected response from the geocoder.")
@@ -111,13 +72,12 @@ def parse_results(payload: object) -> list[GeocodeResult]:
             continue
 
         try:
-            # Note the destructuring order — it is Nominatim's, not ours.
+            # nominatim's order, not ours.
             min_lat, max_lat, min_lon, max_lon = (float(value) for value in box)
             latitude = float(item["lat"])
             longitude = float(item["lon"])
         except (KeyError, TypeError, ValueError):
-            # A malformed entry is skipped rather than failing the whole
-            # search; one bad candidate should not cost the user the others.
+            # skip a malformed entry rather than failing the whole search.
             continue
 
         try:
@@ -134,9 +94,8 @@ def parse_results(payload: object) -> list[GeocodeResult]:
         if not display_name:
             continue
 
-        # With addressdetails=1 Nominatim nests this under "address". Lowercased
-        # because the Geofabrik lookup keys on lowercase, and Nominatim is not
-        # perfectly consistent about case.
+        # nested under "address" with addressdetails=1. lowercased for the
+        # geofabrik lookup.
         address = item.get("address")
         country_code = None
         if isinstance(address, dict):
@@ -147,12 +106,11 @@ def parse_results(payload: object) -> list[GeocodeResult]:
         results.append(
             GeocodeResult(
                 display_name=display_name,
-                # The first comma-separated part is the place itself; the rest
-                # is region and country. "Venice, Veneto, Italy" -> "Venice".
+                # "Venice, Veneto, Italy" -> "Venice".
                 name=display_name.split(",")[0].strip(),
                 latitude=latitude,
                 longitude=longitude,
-                # Mapped into our order here.
+                # converted to our order.
                 south=min_lat,
                 west=min_lon,
                 north=max_lat,
@@ -167,12 +125,7 @@ def parse_results(payload: object) -> list[GeocodeResult]:
 
 
 class NominatimClient:
-    """Looks up places by name.
-
-    No cache, deliberately: this is called once when a human adds a destination,
-    so there is nothing to amortise. Overpass gets a cache because the map hits
-    it repeatedly; this does not.
-    """
+    """looks up places by name. no cache: it's called rarely."""
 
     def search(
         self,
@@ -180,13 +133,12 @@ class NominatimClient:
         viewbox: tuple[float, float, float, float] | None = None,
         limit: int = MAX_RESULTS,
     ) -> list[GeocodeResult]:
-        """Find candidate destinations for a typed name.
+        """find candidates for a typed name.
 
-        `viewbox` is (south, west, north, east). When given, only results
-        inside it are returned — Ask Pina uses this so "Centro" means *this*
-        city's centre, not the first Centro in the world.
+        `viewbox` is (south, west, north, east). when given, only results
+        inside it are returned, so "centro" means this city's centre.
 
-        Raises GeocodeError if the service cannot be reached.
+        raises GeocodeError if the service can't be reached.
         """
         cleaned = query.strip()
         if not cleaned:
@@ -198,16 +150,12 @@ class NominatimClient:
             "q": cleaned,
             "format": "jsonv2",
             "limit": limit,
-            # Needed for address.country_code, which decides which Geofabrik
-            # extract to download. Without it the lookup succeeds and the
-            # destination then cannot auto-fill — a failure two steps removed
-            # from its cause.
+            # needed for country_code, which picks the region to download.
             "addressdetails": 1,
         }
         if viewbox is not None:
             south, west, north, east = viewbox
-            # Nominatim wants x1,y1,x2,y2 — longitude first. bounded=1 turns
-            # the box from a preference into a filter.
+            # nominatim wants lon,lat order. bounded=1 makes it a hard filter.
             params["viewbox"] = f"{west},{north},{east},{south}"
             params["bounded"] = 1
 
@@ -217,9 +165,7 @@ class NominatimClient:
                 params=params,
                 headers={"User-Agent": USER_AGENT},
                 timeout=settings.NOMINATIM_TIMEOUT_SECONDS,
-                # Nominatim redirects http -> https; following keeps a
-                # misconfigured URL working instead of silently returning a 301
-                # body that fails to parse.
+                # nominatim redirects http to https.
                 follow_redirects=True,
             )
         except httpx.TimeoutException as exc:
@@ -254,9 +200,5 @@ _client = NominatimClient()
 
 
 def get_geocoder() -> NominatimClient:
-    """FastAPI dependency returning the shared client.
-
-    The same testing seam as get_db and get_overpass_client: conftest.py swaps
-    this for a fake, which is how the suite stays off the network.
-    """
+    """fastapi dependency. tests swap this for a fake."""
     return _client

@@ -1,23 +1,12 @@
-"""Ask Pina's search: a SearchIntent in, real places out.
+"""ask pina's search: a SearchIntent in, real places out. no llm here.
 
-READ THIS SECOND, after app/llm.py. There is no LLM in this file, and that is
-the design: the model's whole contribution is the SearchIntent it filled in.
-Everything here is ordinary SQL against osm_places, so a result can only be a
-place that exists in OpenStreetMap, with a real pin.
+    inside the search box
+    AND ((category AND cuisine) OR name contains a hint word)
+    AND every requested feature
+    ORDER BY name match first, then distance from the box centre
 
-The shape of the query:
-
-    inside the search box                          (indexed coordinates)
-    AND ((category = ... AND cuisine is X)  OR  name contains "trattoria")
-    AND has feature 1  AND has feature 2 ...       (GIN index on tags)
-    ORDER BY name matched first, then distance from the centre of the box
-
-The OR in the middle is the one subtle part. Only about a third of
-restaurants carry a cuisine tag, so "Italian" by tag alone misses most of them.
-Names fill much of the gap — "Trattoria da Mario" is Italian whatever its tags
-say — so the model also supplies name words, and either kind of evidence counts.
-Without a cuisine, name words only move matching names up the list; see
-search() for the measured reason.
+only about a third of restaurants have a cuisine tag, so name words
+("trattoria") count as evidence too. without a cuisine they only rank.
 """
 
 from __future__ import annotations
@@ -34,42 +23,36 @@ from app.geocode import GeocodeError, GeocodeResult, NominatimClient
 from app.models import Category, Destination, OsmPlace, Place
 from app.schemas import BoundingBox, Feature, PlaceDetails, SearchIntent, Suggestion
 
-#: How many results to return. Enough to choose from, few enough to read.
+#: results per answer.
 RESULT_LIMIT = 25
 
-#: How many cuisines to offer the model. The long tail ("uzbek", 1 place) is
-#: noise that makes the prompt longer and the model slower.
+#: cuisines offered to the model. the long tail only slows it down.
 MAX_CUISINES = 80
 
-#: A named area becomes a box around it at least this big (half-side, in
-#: degrees of latitude — ~650 m), so "near the Colosseum" includes the streets
-#: around it, not just the monument's own outline...
+#: minimum half-side of a named area's box (~650 m), so a landmark includes
+#: the streets around it...
 MIN_AREA_HALF_SPAN = 0.006
-#: ...and at most this big (~3.3 km), so a large district does not quietly
-#: turn into "the whole city".
+#: ...and the maximum (~3.3 km), so a big district isn't the whole city.
 MAX_AREA_HALF_SPAN = 0.03
 
-#: A geocoded "area" at least this fraction of the destination's size, on both
-#: axes, is the city itself under another name (Lisbon / Lisboa).
+#: an "area" at least this fraction of the destination on both axes is the
+#: city itself under another name (lisbon / lisboa).
 WHOLE_CITY_FRACTION = 0.5
 
-#: Geocoder candidates to choose an area from.
+#: geocoder candidates to pick an area from.
 AREA_CANDIDATES = 10
 
-#: How far outside the destination's own box an area may be (degrees). The
-#: stored box is clamped, so a neighbourhood can sit just beyond its edge.
+#: how far past the destination's box an area may be, in degrees.
 AREA_SEARCH_MARGIN = 0.05
 
-#: Which OSM tag values count as having a feature. A list of alternatives per
-#: feature; each alternative is a JSON fragment for `tags @> ...`, which the
-#: GIN index from migration 0006 serves. "only" counts (a vegan-only café is
-#: certainly vegan), "limited" and "no" do not.
+#: osm tag values that count as having a feature. each alternative is a
+#: fragment for `tags @> ...`. "only" counts; "limited" and "no" don't.
 FEATURE_TAGS: dict[Feature, list[dict[str, str]]] = {
     Feature.OUTDOOR_SEATING: [{"outdoor_seating": "yes"}],
     Feature.VEGETARIAN: [
         {"diet:vegetarian": "yes"},
         {"diet:vegetarian": "only"},
-        # Vegan food is vegetarian; OSM rarely tags both.
+        # vegan implies vegetarian; osm rarely tags both.
         {"diet:vegan": "yes"},
         {"diet:vegan": "only"},
     ],
@@ -88,7 +71,7 @@ FEATURE_TAGS: dict[Feature, list[dict[str, str]]] = {
 
 
 def has_feature(tags: Mapping[str, object], feature: Feature) -> bool:
-    """The Python twin of the SQL filter, for labelling a result."""
+    """python version of the sql filter, used to label results."""
     return any(
         all(tags.get(key) == value for key, value in alternative.items())
         for alternative in FEATURE_TAGS[feature]
@@ -96,7 +79,7 @@ def has_feature(tags: Mapping[str, object], feature: Feature) -> bool:
 
 
 def details_from_tags(tags: Mapping[str, object] | None) -> PlaceDetails | None:
-    """osm_places.tags -> the PlaceDetails the API sends. None if no tags."""
+    """osm_places.tags -> PlaceDetails. None if there are no tags."""
     if not tags:
         return None
     cuisine = tags.get("cuisine")
@@ -115,11 +98,7 @@ def _text(value: object) -> str | None:
 
 
 def details_for_refs(db: Session, refs: Iterable[str]) -> dict[str, PlaceDetails]:
-    """Details for saved places, looked up by source_ref in one query.
-
-    One query for the whole list rather than one per place — the N+1 shape the
-    rest of the API also avoids.
-    """
+    """details for saved places by source_ref, in one query."""
     wanted = {ref for ref in refs if ref}
     if not wanted:
         return {}
@@ -139,10 +118,9 @@ def details_for_refs(db: Session, refs: Iterable[str]) -> dict[str, PlaceDetails
 def to_suggestions(
     db: Session, destination_id: int, places: Iterable[OsmPlace]
 ) -> list[Suggestion]:
-    """Cached places -> Suggestions, marking the ones already saved here.
+    """cached places -> Suggestions, marking ones already saved here.
 
-    Shared by the map's /nearby and by /ask, so a place looks the same — same
-    details, same "already saved" rule — whichever way you found it.
+    shared by /nearby and /ask so a place looks the same either way.
     """
     saved_refs = set(
         db.scalars(
@@ -179,12 +157,8 @@ def destination_box(destination: Destination) -> BoundingBox:
 
 
 def cuisines_in(db: Session, box: BoundingBox) -> list[str]:
-    """The cuisine values present in a box, commonest first.
-
-    These become the enum the model must choose from. Raw SQL because
-    `jsonb_array_elements_text` in FROM is a set-returning function, which is
-    clearer written out than coaxed through the ORM.
-    """
+    """cuisine values present in a box, commonest first. raw sql for the
+    set-returning jsonb function."""
     rows = db.execute(
         text(
             """
@@ -213,18 +187,17 @@ def cuisines_in(db: Session, box: BoundingBox) -> list[str]:
 @dataclass(frozen=True)
 class SearchArea:
     box: BoundingBox
-    #: "near Alfama", "in the map view", "in Lisbon".
+    #: e.g. "near Alfama", "in the map view", "in Lisboa".
     label: str
-    #: False when a named area could not be found.
+    #: false when a named area couldn't be found.
     found: bool = True
 
 
 def _box_around(result: GeocodeResult) -> BoundingBox:
-    """A search box for a geocoded area: its own outline, within limits.
+    """a search box around a geocoded area, within the min/max size.
 
-    The minimum matters for landmarks (a monument's outline is a few metres
-    across), the maximum for big districts. Longitude spans are widened by
-    1/cos(latitude) so the box is roughly square on the ground, not on paper.
+    longitude is scaled by 1/cos(latitude) so the box is roughly square on
+    the ground.
     """
     lat, lon = result.latitude, result.longitude
     scale = 1 / max(math.cos(math.radians(lat)), 0.1)
@@ -251,12 +224,9 @@ def resolve_area(
     viewport: BoundingBox | None,
     geocoder: NominatimClient,
 ) -> SearchArea:
-    """Decide where to search.
+    """decide where to search: named area, then map view, then destination.
 
-    A named area wins; then the map's current view; then the whole destination.
-    If the area cannot be found the search still runs, more widely, and says
-    so — an honest "couldn't find Alfama, searched all of Lisbon" beats both an
-    error and a silent substitution.
+    if the area can't be found the search still runs wider, with found=False.
     """
     fallback = (
         SearchArea(viewport, "in the map view")
@@ -273,24 +243,19 @@ def resolve_area(
         destination.east + AREA_SEARCH_MARGIN,
     )
     try:
-        # More candidates than a destination search: the right one is often
-        # not Nominatim's first, so we choose by importance below.
+        # more candidates than usual; we pick by importance below.
         results = geocoder.search(
             intent.area, viewbox=viewbox, limit=AREA_CANDIDATES
         )
     except GeocodeError:
-        # The area is a refinement, not the point. An unreachable geocoder
-        # should cost the user precision, not the whole answer.
+        # an unreachable geocoder costs precision, not the answer.
         results = []
 
     if not results:
         return SearchArea(fallback.box, fallback.label, found=False)
 
     found = max(results, key=lambda result: result.importance)
-    # "pizza in Lisbon" while the destination is called "Lisboa": the "area"
-    # is the city itself. Its outline spans most of the destination, so it is
-    # searched as the whole destination rather than shrunk to a few blocks
-    # around the city's centre point.
+    # the "area" is the city itself (lisbon vs lisboa), so search all of it.
     if (found.north - found.south) >= WHOLE_CITY_FRACTION * (
         destination.north - destination.south
     ) and (found.east - found.west) >= WHOLE_CITY_FRACTION * (
@@ -311,7 +276,7 @@ def search(
     box: BoundingBox,
     limit: int = RESULT_LIMIT,
 ) -> tuple[int, list[Suggestion]]:
-    """Run the intent inside the box. Returns (total matches, the closest few)."""
+    """run the intent in the box. returns (total matches, closest results)."""
     conditions = [
         OsmPlace.latitude >= box.south,
         OsmPlace.latitude <= box.north,
@@ -319,7 +284,7 @@ def search(
         OsmPlace.longitude <= box.east,
     ]
 
-    # autoescape: a "%" or "_" in a word is a literal, not a wildcard.
+    # autoescape: % and _ are literal.
     name_match = [
         OsmPlace.name.icontains(word, autoescape=True) for word in intent.name_words
     ]
@@ -332,25 +297,20 @@ def search(
     )
 
     if intent.cuisines:
-        # With a cuisine, a name word is *alternative evidence* for it: tagged
-        # italian, OR "trattoria" in the name — see the module docstring.
-        #
-        # And a name match also overrides the category guess. Measured: the
-        # model filed "pastéis de nata" under restaurant, which hid the café
-        # literally called "Fábrica de Pastéis de Nata". The category is the
-        # model's guess; a name that says it outright is evidence.
+        # name words are alternative evidence for the cuisine, and a name
+        # match also overrides the category guess ("pastéis de nata" came back
+        # as restaurant, hiding the café named after them).
         cuisine = or_(
             *(OsmPlace.tags.contains({"cuisine": [c]}) for c in intent.cuisines)
         )
         typed = and_(category, cuisine) if category is not None else cuisine
         conditions.append(or_(typed, named) if named is not None else typed)
     elif category is not None:
-        # Without a cuisine, name words only *rank*. Measured: for "a vegan
-        # café" the model offered "vegano", and as a filter that threw away
-        # every vegan café not literally named so.
+        # without a cuisine, name words only rank. as a filter, "vegano" hid
+        # every vegan café not named that.
         conditions.append(category)
 
-    # Every feature asked for must be present; any alternative spelling counts.
+    # every requested feature must be present.
     for feature in intent.features:
         conditions.append(
             or_(*(OsmPlace.tags.contains(alt) for alt in FEATURE_TAGS[feature]))
@@ -359,15 +319,14 @@ def search(
     where = and_(*conditions)
     total = db.scalar(select(func.count()).select_from(OsmPlace).where(where)) or 0
 
-    # Squared distance on a locally flat map: good enough to rank places a few
-    # kilometres apart, and far cheaper than true great-circle distance.
+    # squared flat-map distance. fine for ranking within a city.
     center_lat, center_lon = box.center
     lon_scale = math.cos(math.radians(center_lat))
     distance = func.power(OsmPlace.latitude - center_lat, 2) + func.power(
         (OsmPlace.longitude - center_lon) * lon_scale, 2
     )
 
-    # Places whose name says it first, then nearest.
+    # name matches first, then nearest.
     ordering = [distance, OsmPlace.id]
     if named is not None:
         ordering.insert(0, case((named, 0), else_=1))
@@ -378,10 +337,9 @@ def search(
     return total, to_suggestions(db, destination_id, places)
 
 
-# --- the reply -----------------------------------------------------------------
+# --- the reply ---------------------------------------------------------------
 
-#: How each feature reads after "with": "Italian restaurants with outdoor
-#: seating and vegan options".
+#: how each feature reads after "with".
 FEATURE_PHRASES: dict[Feature, str] = {
     Feature.OUTDOOR_SEATING: "outdoor seating",
     Feature.VEGETARIAN: "vegetarian options",
@@ -407,8 +365,7 @@ def _and(items: list[str]) -> str:
     return f"{', '.join(items[:-1])} and {items[-1]}"
 
 
-#: Cuisines named after a people or place, which English capitalises:
-#: "Italian", "Japanese", "Spanish", "French", "Middle eastern", "Thai".
+#: cuisines named after a people or place, which english capitalises.
 _PROPER_CUISINE = re.compile(r"(an|ese|ish|ch|ern)$")
 _PROPER_CUISINE_EXTRA = frozenset(
     {"thai", "greek", "israeli", "nepali", "pakistani", "basque", "swiss",
@@ -418,7 +375,7 @@ _PROPER_CUISINE_EXTRA = frozenset(
 
 def _cuisine_word(cuisine: str) -> str:
     """ "italian" -> "Italian", "middle_eastern" -> "Middle eastern",
-    "seafood" -> "seafood". "fish" ends in -ish but is not a nationality."""
+    "seafood" -> "seafood". "fish" isn't a nationality."""
     words = cuisine.replace("_", " ")
     if cuisine != "fish" and (
         _PROPER_CUISINE.search(cuisine) or cuisine in _PROPER_CUISINE_EXTRA
@@ -428,7 +385,7 @@ def _cuisine_word(cuisine: str) -> str:
 
 
 def _thing(intent: SearchIntent, count: int, features: list[Feature]) -> str:
-    """ "Italian restaurants with outdoor seating", "a vegan-options café"... """
+    """ "Italian restaurants with outdoor seating", "sushi cafés", ... """
     singular, plural = CATEGORY_NOUNS[intent.category]
     noun = singular if count == 1 else plural
     cuisines = [_cuisine_word(c) for c in intent.cuisines]
@@ -445,12 +402,10 @@ def describe(
     total: int,
     dropped: list[Feature],
 ) -> str:
-    """Pina's reply, written from the results rather than by the model.
+    """pina's reply, written from the results rather than by the model.
 
-    A template, deliberately. It is instant and free, and it can only say what
-    the search actually found — a small local model writing prose is exactly
-    where invented details creep in. When Pina moves to a hosted model, this
-    is the function the model's own reply would replace.
+    a template so it's instant and can only describe what was found. a hosted
+    model could replace this later.
     """
     sentences: list[str] = []
 
@@ -460,7 +415,7 @@ def describe(
             f"{area.label.removeprefix('in ')} instead."
         )
 
-    # When features were dropped, the results are described without them...
+    # describe the results without the dropped features...
     kept = [f for f in intent.features if f not in dropped]
 
     if total == 0:
@@ -473,7 +428,7 @@ def describe(
     count = f"{total:,}"
     sentences.append(f"{count} {_thing(intent, total, kept)} {area.label}.")
 
-    # ...and the reply says so, rather than letting the user assume they match.
+    # ...and say they were dropped.
     if dropped:
         missing = _and([FEATURE_PHRASES[f] for f in dropped])
         sentences.append(

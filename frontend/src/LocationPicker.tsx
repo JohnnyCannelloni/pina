@@ -1,11 +1,7 @@
 /**
- * The optional mini-map inside the save form. Click to drop or move a pin.
+ * optional mini-map in the save form: click to drop or move the pin.
  *
- * READ THIS FOURTH — after AddPlaceForm. It is where the two numbers in the
- * POST body come from, and it is deliberately dumb: it holds no state of its
- * own and saves nothing. It takes a value, reports clicks, and that is all. The
- * pin lives in AddPlaceForm's form state alongside the name and category, which
- * is why it is submitted by the same Save button and cleared by the same reset.
+ * stateless: the pin lives in AddPlaceForm's state with the other fields.
  */
 
 import { MapContainer, Marker, TileLayer, useMapEvents } from "react-leaflet";
@@ -19,25 +15,18 @@ export interface Coordinates {
 }
 
 interface LocationPickerProps {
-  /** Where the map opens — the destination's own coordinates, from the API. */
+  /** where the map opens: the destination's coordinates. */
   center: Coordinates;
-  /** The pin currently chosen, or null for "no pin". */
+  /** the chosen pin, or null for no pin. */
   value: Coordinates | null;
   onChange: (coordinates: Coordinates) => void;
 }
 
-/**
- * Leaflet's map instance is not a React component, so map events are not React
- * props. `useMapEvents` is react-leaflet's bridge: it must be called from a
- * component *inside* MapContainer, because that is where the map instance is
- * available on context. Hence this tiny renderless child rather than an
- * onClick on MapContainer itself.
- */
+/** map events need a child of MapContainer, where the map instance is available. */
 function ClickCapture({ onChange }: { onChange: (c: Coordinates) => void }) {
   useMapEvents({
     click(event) {
-      // e.latlng is Leaflet's naming; renamed here so that from this point on
-      // the values carry the same names as the API and the database columns.
+      // rename to match the api fields.
       onChange({ latitude: event.latlng.lat, longitude: event.latlng.lng });
     },
   });
@@ -51,21 +40,18 @@ export function LocationPicker({ center, value, onChange }: LocationPickerProps)
         className="picker__map"
         center={[center.latitude, center.longitude]}
         zoom={CITY_ZOOM}
-        // The form is a scrollable column on a phone. Scroll-wheel zoom would
-        // hijack that scroll the moment the cursor crossed the map, so it is
-        // off; the +/- buttons and pinch-zoom still work.
+        // the form scrolls on a phone, so wheel zoom would hijack it. buttons
+        // and pinch still work.
         scrollWheelZoom={false}
       >
         <TileLayer url={OSM_TILE_URL} attribution={OSM_ATTRIBUTION} />
         <ClickCapture onChange={onChange} />
-        {/* One marker or none — clicking again moves this one rather than
-            adding a second, because `value` is a single value, not a list. */}
+        {/* one marker or none; clicking again moves it. */}
         {value !== null && (
           <Marker
             position={[value.latitude, value.longitude]}
             icon={draftIcon}
-            // Dragging is a second, more precise way to adjust the pin, and it
-            // is how most people expect a map marker to behave.
+            // dragging for fine adjustment.
             draggable
             eventHandlers={{
               dragend(event) {

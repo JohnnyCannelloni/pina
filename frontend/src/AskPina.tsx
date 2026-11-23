@@ -1,19 +1,12 @@
 /**
- * Ask Pina, as a conversation: ask, get real places, ask a follow-up.
+ * ask pina as a conversation: ask, get real places, follow up.
  *
- * READ THIS AFTER backend/app/llm.py and app/ask.py. Chat-shaped, structured
- * underneath:
+ * each message becomes a search on the server; results are always real osm
+ * places. follow-ups send the previous search so it's refined, not restarted.
+ * the reply sentence comes from the server (ask.describe).
  *
- *   - The model never writes about places. It turns each message into a
- *     search, and every result is a real OpenStreetMap place.
- *   - A follow-up sends the previous search along, so "only vegan ones"
- *     *refines* it instead of starting over.
- *   - Pina's reply sentence is written by the server from the results
- *     (app/ask.py:describe), so it cannot claim what the data does not show.
- *     A hosted model can write it later; this component would not change.
- *
- * The latest answer is owned by DestinationPage, not by this component,
- * because the map draws it too. The conversation itself lives here.
+ * the latest answer lives in DestinationPage, because the map draws it too.
+ * the conversation lives here.
  */
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
@@ -33,28 +26,25 @@ import {
   type Suggestion,
 } from "./types";
 
-/** Results shown at first, and added per "Show more". Five is what fits
- *  beside a map without scrolling, and the list is closest-first, so the top
- *  few are the ones that matter. */
+/** results shown at first and per "show more". */
 export const ASK_PAGE_SIZE = 5;
 
 interface AskPinaProps {
   destination: DestinationDetail;
   places: Place[];
-  /** The latest answer: the one whose results are listed and pinned. */
+  /** the latest answer, whose results are listed and pinned. */
   answer: AskResponse | null;
   onAnswer: (answer: AskResponse | null) => void;
-  /** How many results to show; owned by DestinationPage, which gives the map
-   *  the same slice. */
+  /** how many results to show; the map gets the same slice. */
   shown: number;
   onShowMore: () => void;
-  /** The map's current view, or null when the map is not open. */
+  /** the map's current view, or null when the map isn't open. */
   getViewport: () => Bounds | null;
   onSaved: (place: Place) => void;
   onShowOnMap: (result: Suggestion) => void;
 }
 
-/** One exchange. `answer` and `error` are both null while Pina is thinking. */
+/** one exchange. `answer` and `error` are both null while pina is thinking. */
 interface Turn {
   id: number;
   question: string;
@@ -86,13 +76,12 @@ export function AskPina({
 
   const asking = turns.some((turn) => turn.answer === null && turn.error === null);
 
-  // A different destination is a different conversation.
+  // a different destination is a different conversation.
   useEffect(() => {
     setTurns([]);
   }, [destination.id]);
 
-  // Keep the newest message in view. The log scrolls, not the page: scrolling
-  // the page would yank the map away while you are looking at it.
+  // keep the newest message in view by scrolling the log, not the page.
   useEffect(() => {
     const element = log.current;
     if (element) {
@@ -100,14 +89,12 @@ export function AskPina({
     }
   }, [turns]);
 
-  // Derived from `places`, like the map's: saving a result marks it saved
-  // here with no extra state.
+  // derived from `places`, so a save shows up here with no extra state.
   const savedRefs = new Set(
     places.map((p) => p.source_ref).filter((ref): ref is string => ref !== null),
   );
 
-  /** The search a follow-up refines: the latest one that got an answer. A
-   *  failed turn does not reset the conversation. */
+  /** the search a follow-up refines: the latest one with an answer. */
   function previousSearch(): SearchIntent | null {
     for (let i = turns.length - 1; i >= 0; i--) {
       const turnAnswer = turns[i]?.answer;
@@ -146,8 +133,7 @@ export function AskPina({
       settle({ answer: response });
       onAnswer(response);
     } catch (caught) {
-      // The 503 carries the command that fixes it ("brew services start
-      // ollama"), so the server's message is shown as-is.
+      // the 503 message includes the fix, so show it as-is.
       settle({
         error: caught instanceof Error ? caught.message : "Could not ask.",
       });
@@ -202,15 +188,14 @@ export function AskPina({
           </p>
         </div>
       ) : (
-        // aria-live: a screen reader announces Pina's replies as they arrive.
+        // aria-live: replies are announced as they arrive.
         <ol className="chat__log" ref={log} aria-live="polite">
           {turns.map((turn) => (
             <li key={turn.id} className="chat__turn">
               <p className="chat__bubble chat__bubble--user">{turn.question}</p>
               <PinaMessage
                 turn={turn}
-                // Only the latest answer lists its results: they are the ones
-                // on the map. Earlier replies stay as a record of the search.
+                // only the latest answer lists results; they're the ones on the map.
                 current={turn.answer !== null && turn.answer === answer}
                 destinationId={destination.id}
                 destinationName={destination.name}
@@ -318,8 +303,7 @@ function PinaMessage({
   );
 }
 
-/** What the model understood, as chips — so a wrong guess, or a follow-up
- *  that dropped something you meant to keep, is spotted at a glance. */
+/** what the model understood, as chips, so a wrong guess is easy to spot. */
 function Understood({ answer }: { answer: AskResponse }) {
   const intent = answer.interpretation;
   return (
@@ -370,8 +354,7 @@ function ResultList({
   onSaved: (place: Place) => void;
   onShowOnMap: (result: Suggestion) => void;
 }) {
-  // One row open at a time: details for one place are useful, details for
-  // five at once are a wall of text.
+  // one row open at a time.
   const [expandedRef, setExpandedRef] = useState<string | null>(null);
   useEffect(() => setExpandedRef(null), [answer]);
 
@@ -404,9 +387,7 @@ function ResultList({
           />
         ))}
       </ul>
-      {/* Only as far as the results already fetched — no new request. The
-          server sends the 25 closest; past that, a follow-up that narrows the
-          search beats a longer list. */}
+      {/* only up to the 25 already fetched; past that, narrow the search. */}
       {more > 0 && (
         <button
           type="button"
@@ -420,8 +401,7 @@ function ResultList({
   );
 }
 
-/** The one-line summary under a result's name: what it is, its cuisine, and
- *  a couple of features. The rest waits until the row is opened. */
+/** the summary line under a result: category, cuisine, a couple of features. */
 function summary(result: Suggestion): string {
   const parts: string[] = [CATEGORY_LABELS[result.category]];
   const details = result.details;
@@ -434,9 +414,7 @@ function summary(result: Suggestion): string {
   return parts.join(" · ");
 }
 
-/** One result row: compact until clicked. Owns its own saving state, like a
- *  map popup does, so a failed save on one row cannot leave an error on
- *  another. */
+/** one result row, compact until clicked. keeps its own saving state. */
 function AskResult({
   result,
   destinationId,
@@ -463,8 +441,7 @@ function AskResult({
     setSaving(true);
     setError(null);
     try {
-      // The same save as the map popup's — an ordinary save carrying a
-      // source_ref. There is no separate "save from Ask" path.
+      // the same save as a map popup's.
       onSaved(
         await createPlace(destinationId, {
           name: result.name,
@@ -488,8 +465,7 @@ function AskResult({
   return (
     <li className={`ask__row${expanded ? " ask__row--open" : ""}`}>
       <div className="ask__rowhead">
-        {/* The head is the toggle; Save is its sibling, not inside it — a
-            button inside a button is invalid HTML. */}
+        {/* save sits beside the toggle; a button can't contain a button. */}
         <button
           type="button"
           className="ask__toggle"

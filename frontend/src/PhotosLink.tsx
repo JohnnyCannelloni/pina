@@ -1,34 +1,20 @@
 /**
- * A link to a place's Google Maps page, where its photos are.
+ * a link to a place's google maps page, for photos and reviews.
  *
- * Why a link rather than photos in the app: OpenStreetMap has photos for about
- * 0.3% of restaurants (measured on Portugal: 75 of 29,046), so the open data
- * cannot show dishes. Google Maps can — people upload photos of what they ate —
- * but showing those *inside* Pina needs a Places API key with billing.
- *
- * A Maps URL needs no key at all (Google documents this), costs nothing, and
- * opens the real listing with its photos, reviews and hours. It is the cheapest
- * thing that actually answers "what is the food like here?".
+ * osm has photos for ~0.3% of restaurants, and showing google's photos in the
+ * app needs a paid places api key. a maps url needs no key.
  */
 
-/** How far in the Maps link zooms. 18 is street level, so the search only
- *  considers what is on the block around the pin. */
+/** street level, so the search only considers the block around the pin. */
 const PLACE_ZOOM = 18;
 
 /**
- * Google Maps URL that opens the place's own page.
+ * google maps url that opens the place's own page.
  *
- * With coordinates, the URL is `/maps/search/<name>/@lat,lng,zoom`: a search
- * for the name, run at the pin at street level. A name alone, even with the
- * city ("Caffè Florian, Venice"), often matches several places, and then Maps
- * shows a list of results instead of the place. Searching at the exact spot
- * leaves one match, and Maps opens it directly.
- *
- * Without coordinates (a saved place with no pin), all we have is the name, so
- * it falls back to the documented `api=1` search with the city added.
- *
- * Opening a place page with certainty would need its Google place ID, which
- * only the paid Places API gives out. OpenStreetMap doesn't store Google IDs.
+ * with coordinates: `/maps/search/<name>/@lat,lng,zoom`, a name search at the
+ * pin, which usually has a single match and opens it directly. without them:
+ * the documented `api=1` search with the city appended. a guaranteed place
+ * page would need a google place id, which only the paid api provides.
  */
 export function googleMapsUrl(
   name: string,
@@ -37,8 +23,7 @@ export function googleMapsUrl(
   longitude: number | null = null,
 ): string {
   if (latitude !== null && longitude !== null) {
-    // encodeURIComponent, not URLSearchParams: the name is a path segment
-    // here, so a "/" in it must become %2F and a space %20, not "+".
+    // the name is a path segment here, so "/" -> %2F and space -> %20.
     const at = `@${latitude.toFixed(6)},${longitude.toFixed(6)},${PLACE_ZOOM}z`;
     return `https://www.google.com/maps/search/${encodeURIComponent(name)}/${at}`;
   }
@@ -48,7 +33,7 @@ export function googleMapsUrl(
 
 interface PhotosLinkProps {
   name: string;
-  /** The destination's name, used only when there are no coordinates. */
+  /** the destination's name, used only without coordinates. */
   near: string;
   latitude?: number | null;
   longitude?: number | null;
@@ -64,9 +49,8 @@ export function PhotosLink({
 }: PhotosLinkProps) {
   return (
     <a
-      // A new tab, so the map and any half-filled form survive.
-      // noopener stops the opened page from reaching back into this one
-      // through window.opener.
+      // new tab, so the map and any half-filled form survive. noopener keeps
+      // the opened page from reaching window.opener.
       href={googleMapsUrl(name, near, latitude, longitude)}
       target="_blank"
       rel="noopener noreferrer"

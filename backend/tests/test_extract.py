@@ -1,9 +1,7 @@
-"""Tests for region resolution and the extract importer.
+"""region resolution and the extract importer.
 
-No network: `regions.py` is tested against a small literal index fixture, and
-imports against a real `.osm.pbf` written by osmium at test time. So the
-polygon maths, the tag mapping and the upsert are all production code paths —
-only the 476 MB download is absent.
+no network: regions are tested against a small literal index, and imports
+against a real .osm.pbf written by osmium during the test.
 """
 
 import json
@@ -44,14 +42,11 @@ REGION = "europe/testland"
 
 
 def write_pbf(path: Path, nodes: list[tuple[int, float, float, dict[str, str]]]) -> None:
-    """Write a real .osm.pbf containing the given nodes.
+    """write a real .osm.pbf with the given (id, latitude, longitude, tags) nodes.
 
-    `nodes` are (id, latitude, longitude, tags). Note osmium's Node location is
-    (lon, lat) — the opposite order from everything else here, which is exactly
-    the sort of thing worth pinning down in a helper once.
+    osmium's location is (lon, lat).
     """
-    # SimpleWriter refuses to open an existing file, and the idempotency test
-    # deliberately writes the same path twice.
+    # SimpleWriter won't overwrite, and some tests write the same path twice.
     path.unlink(missing_ok=True)
     with osmium.SimpleWriter(str(path)) as writer:
         for node_id, latitude, longitude, tags in nodes:
@@ -63,7 +58,7 @@ def write_pbf(path: Path, nodes: list[tuple[int, float, float, dict[str, str]]])
 
 
 def square(west: float, south: float, east: float, north: float) -> list:
-    """A closed GeoJSON ring, in [longitude, latitude] order."""
+    """a closed geojson ring, in [longitude, latitude] order."""
     return [
         [west, south],
         [east, south],
@@ -75,7 +70,7 @@ def square(west: float, south: float, east: float, north: float) -> list:
 
 @pytest.fixture
 def cached_extract(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Point the extract cache at a temp dir and return the fixture's path."""
+    """point the extract cache at a temp dir and return the fixture's path."""
     monkeypatch.setattr(
         extract_module.settings, "EXTRACT_CACHE_DIR", str(tmp_path)
     )
@@ -84,12 +79,7 @@ def cached_extract(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 @pytest.fixture
 def fake_index(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A tiny Geofabrik-shaped index: a country with one nested sub-region.
-
-    Deliberately shaped like the real case that broke: a big region and a
-    smaller one inside it, so "smallest containing region wins" is actually
-    exercised rather than assumed.
-    """
+    """a tiny geofabrik-style index: a country with a nested sub-region."""
     index = {
         "features": [
             {
@@ -115,9 +105,8 @@ def fake_index(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
                 },
             },
             {
-                # An L-shaped region whose *bounding box* covers (2.5, 2.5) but
-                # whose actual shape does not. This is the case that made the
-                # bounding-box-only version put New York City in New Jersey.
+                # l-shaped: its bounding box covers (2.5, 2.5) but its shape
+                # doesn't.
                 "properties": {
                     "id": "bigland/lshape",
                     "name": "Bigland / L",
@@ -145,29 +134,21 @@ def fake_index(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         regions_module.settings, "EXTRACT_CACHE_DIR", str(tmp_path)
     )
-    # Clear the process-level cache, or a previous test's index would be reused.
+    # clear the in-process index cache between tests.
     monkeypatch.setattr(regions_module, "_regions", None)
 
 
-# --- region resolution -----------------------------------------------------
+# --- region resolution -------------------------------------------------------
 
 
 def test_resolve_picks_the_smallest_containing_region(fake_index: None) -> None:
-    """The whole New York fix, in one assertion.
-
-    A point inside both the country and its sub-region must resolve to the
-    sub-region. In the real index that is the difference between
-    north-america/us/new-york at 476 MB and north-america/us at 11,706 MB.
-    """
-    # (1.5, 1.5) is well inside smallstate and well outside the L-shape.
-    # Avoid a point that lands exactly on a polygon vertex: whether a boundary
-    # point counts as inside is genuinely undefined for ray casting, so a test
-    # sitting on one is testing an implementation detail, not behaviour.
+    """a point in both a country and its sub-region resolves to the sub-region."""
+    # well inside smallstate and outside the l-shape. not on a vertex, where
+    # ray casting is undefined.
     chosen = resolve_region(1.5, 1.5)
     assert chosen.id == "bigland/smallstate"
 
-    # And the country is genuinely a candidate — the test would be vacuous if
-    # only one region contained the point.
+    # the country really is a candidate too.
     assert [region.id for region in candidates_for(1.5, 1.5)] == [
         "bigland/smallstate",
         "bigland",
@@ -175,23 +156,17 @@ def test_resolve_picks_the_smallest_containing_region(fake_index: None) -> None:
 
 
 def test_resolve_falls_back_to_the_country(fake_index: None) -> None:
-    """Somewhere with no sub-region still resolves."""
+    """somewhere without a sub-region still resolves to the country."""
     assert resolve_region(8.0, 8.0).id == "bigland"
 
 
 def test_resolve_uses_real_geometry_not_the_bounding_box(
     fake_index: None,
 ) -> None:
-    """A point in a region's bbox but outside its shape is excluded.
+    """a point inside a region's box but outside its shape is excluded.
 
-    This is the regression test for a measured failure: with a bounding-box
-    test, New York City resolved to `us/new-jersey` (New Jersey is a thin
-    diagonal state whose box covers Manhattan) and Lisbon resolved to `spain`.
-    Two of five test cities landed in the wrong state or country.
-
-    Here, (2.5, 2.5) sits in the notch of the L-shaped region — inside its
-    bounding box, outside its polygon. The smaller bbox area means a
-    bbox-only implementation would prefer it and be wrong.
+    regression test: a bounding-box check put new york city in new jersey and
+    lisbon in spain.
     """
     lshape = find_region("bigland/lshape")
     assert lshape.in_bounds(2.5, 2.5)  # the bbox does contain the point
@@ -203,23 +178,13 @@ def test_resolve_uses_real_geometry_not_the_bounding_box(
 def test_resolve_raises_when_nothing_contains_the_point(
     fake_index: None,
 ) -> None:
-    """Mid-ocean raises rather than returning None.
-
-    Returning None would let a caller read "no map data here" as "no
-    restaurants here" — a silent empty map, the failure mode this whole feature
-    has been fighting.
-    """
+    """mid-ocean raises instead of returning None."""
     with pytest.raises(UnsupportedRegion):
         resolve_region(-40.0, -140.0)
 
 
 def test_region_url_comes_from_the_index(fake_index: None) -> None:
-    """The download URL is read, not constructed.
-
-    In the real index a region's id and its URL path differ — "us/new-york" is
-    published under north-america/ — so building the URL from the id would be
-    wrong exactly where it matters most.
-    """
+    """the download url comes from the index, not from the id."""
     assert (
         find_region("bigland/smallstate").pbf_url
         == "https://example.test/smallstate.osm.pbf"
@@ -227,21 +192,16 @@ def test_region_url_comes_from_the_index(fake_index: None) -> None:
 
 
 def test_multipolygon_and_polygon_are_both_handled(fake_index: None) -> None:
-    """The index mixes both geometry types, nested one level apart."""
+    """polygon and multipolygon geometries are both handled."""
     assert find_region("bigland").contains(5.0, 5.0)  # Polygon
     assert find_region("bigland/smallstate").contains(1.5, 1.5)  # MultiPolygon
 
 
-# --- area clamping ---------------------------------------------------------
+# --- area clamping -----------------------------------------------------------
 
 
 def test_clamp_area_leaves_new_york_city_alone() -> None:
-    """NYC's real bounding box must survive unclamped.
-
-    The regression test for the fence: at the old 0.12-degree limit, NYC's
-    0.44 x 0.56 box was cut to a 13 km square, so panning across the city
-    simply stopped producing markers.
-    """
+    """new york city's real box isn't clamped (regression for the old 0.12 limit)."""
     south, west, north, east = clamp_area(
         40.7128, -74.0060, 40.4774, -74.2591, 40.9176, -73.7004
     )
@@ -250,19 +210,19 @@ def test_clamp_area_leaves_new_york_city_alone() -> None:
 
 
 def test_clamp_area_still_rejects_a_continent() -> None:
-    """The loose sanity limit remains."""
+    """the loose sanity limit still applies."""
     south, west, north, east = clamp_area(0.0, 0.0, -45.0, -90.0, 45.0, 90.0)
     assert north - south <= MAX_DESTINATION_SPAN_DEGREES + 1e-9
     assert east - west <= MAX_DESTINATION_SPAN_DEGREES + 1e-9
 
 
-# --- importing -------------------------------------------------------------
+# --- importing ---------------------------------------------------------------
 
 
 def test_import_maps_tags_and_drops_junk(
     db_session: Session, cached_extract: Path
 ) -> None:
-    """Each OSM tag lands in the right category; unusable nodes are skipped."""
+    """tags map to the right category; unusable nodes are skipped."""
     write_pbf(
         cached_extract,
         [
@@ -288,18 +248,17 @@ def test_import_maps_tags_and_drops_junk(
         "Palazzo Ducale": "sight",
         "Galleria": "sight",
     }
-    # Provenance, so a region can be refreshed or dropped wholesale.
+    # provenance.
     assert {row.region for row in rows} == {REGION}
 
 
 def test_import_keeps_the_useful_tags(
     db_session: Session, cached_extract: Path
 ) -> None:
-    """The whitelisted OSM tags land in osm_places.tags, cleaned.
+    """whitelisted tags land in osm_places.tags, cleaned.
 
-    Each odd value here is one seen in real data: a ;-list of cuisines, a bare
-    "www." website, a contact:* key instead of the plain one, two phone numbers,
-    and a `javascript:` "website" that must never reach an <a href>.
+    covers values seen in real data: a cuisine list, a bare "www." site,
+    contact:* keys, two phone numbers, and a javascript: "website".
     """
     write_pbf(
         cached_extract,
@@ -347,16 +306,16 @@ def test_import_keeps_the_useful_tags(
         "website": "https://www.trattoriarosa.it",
         "phone": "+39 041 123",
     }
-    # The bad link is dropped, and with nothing else left the row has no tags.
+    # the bad link is dropped, leaving no tags at all.
     assert tags["Sneaky Bar"] is None
     assert tags["Plain Café"] is None
 
-    # A real SQL NULL, not the JSON value `null` — see none_as_null in models.py.
+    # sql null, not json null.
     assert db_session.scalar(
         select(func.count()).select_from(OsmPlace).where(OsmPlace.tags.is_(None))
     ) == 2
 
-    # The containment query app/ask.py relies on: a list matches either value.
+    # the containment query app/ask.py relies on.
     italian = db_session.scalars(
         select(OsmPlace.name).where(OsmPlace.tags.contains({"cuisine": ["pizza"]}))
     ).all()
@@ -364,7 +323,7 @@ def test_import_keeps_the_useful_tags(
 
 
 def test_reimport_updates_tags(db_session: Session, cached_extract: Path) -> None:
-    """A place imported before 0006 gets its tags on the next import."""
+    """a place imported before 0006 gets tags on the next import."""
     write_pbf(
         cached_extract,
         [(1, 45.4371, 12.3326, {"name": "Rosa", "amenity": "restaurant"})],
@@ -393,12 +352,7 @@ def test_reimport_updates_tags(db_session: Session, cached_extract: Path) -> Non
 def test_import_keeps_the_whole_region(
     db_session: Session, venice: Destination, cached_extract: Path
 ) -> None:
-    """Places far outside any destination are kept.
-
-    The opposite of the previous behaviour, and the point of migration 0005: a
-    place 500 km from Venice is still cached, so a destination added in Rome
-    tomorrow needs no re-import, and panning out of Venice does not hit a fence.
-    """
+    """places far from any destination are still cached."""
     write_pbf(
         cached_extract,
         [
@@ -415,12 +369,7 @@ def test_import_keeps_the_whole_region(
 def test_import_is_idempotent_and_updates_renamed_places(
     db_session: Session, cached_extract: Path
 ) -> None:
-    """Re-importing updates in place rather than duplicating.
-
-    This is the ON CONFLICT DO UPDATE in _flush, now keyed on source_ref alone.
-    DO NOTHING would keep the stale name forever; no clause at all would raise a
-    unique violation on the second import and make refreshing impossible.
-    """
+    """re-importing updates rows instead of duplicating them."""
     write_pbf(
         cached_extract,
         [(1, 45.4371, 12.3326, {"name": "Old Name", "amenity": "restaurant"})],
@@ -441,12 +390,12 @@ def test_import_is_idempotent_and_updates_renamed_places(
 def test_import_without_a_downloaded_file_raises(
     db_session: Session, cached_extract: Path
 ) -> None:
-    """A missing extract is a clear error, not an empty success."""
+    """a missing extract is an error, not an empty success."""
     with pytest.raises(ExtractError, match="not been downloaded"):
         import_extract(db_session, REGION)
 
 
-# --- the orchestrating sync ------------------------------------------------
+# --- the sync ----------------------------------------------------------------
 
 
 def test_sync_imports_and_records_coverage(
@@ -457,13 +406,8 @@ def test_sync_imports_and_records_coverage(
     fake_index: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A full run fills the cache, marks ready, and records where it covers.
-
-    The coverage bounds are the part worth asserting: without them `/nearby`
-    cannot tell an empty area from an unimported one.
-    """
-    # Point the destination at the fixture region, and make find_region resolve
-    # it — the fake index knows nothing about "europe/testland".
+    """a full run fills the cache, marks ready and records coverage bounds."""
+    # point the destination at the fixture region the fake index doesn't know.
     venice.region = REGION
     db_session.commit()
     monkeypatch.setattr(
@@ -508,7 +452,7 @@ def test_sync_imports_and_records_coverage(
     assert extract is not None
     assert extract.state == ExtractState.READY
     assert extract.place_count == 2
-    # Coverage recorded, so /nearby can answer "covered" rather than guessing.
+    # coverage recorded.
     assert (extract.south, extract.north) == (45.0, 46.0)
 
 
@@ -519,12 +463,7 @@ def test_sync_reports_an_unsupported_location_without_touching_saved_places(
     fake_index: None,
     client,
 ) -> None:
-    """A location no region covers fails clearly and harmlessly.
-
-    The second half is the guarantee that matters: losing suggestions must never
-    cost you your own data. `places` and `osm_places` being separate tables is
-    what makes that true structurally.
-    """
+    """an unsupported location fails clearly and leaves saved places alone."""
     saved = client.post(
         f"/api/destinations/{venice.id}/places",
         json={"name": "My Own Place", "category": "cafe"},
@@ -532,7 +471,7 @@ def test_sync_reports_an_unsupported_location_without_touching_saved_places(
     assert saved.status_code == 201, saved.text
 
     venice.region = None
-    # Mid-Pacific: the fixture index covers only 0..10 degrees.
+    # mid-pacific: the fixture index only covers 0..10 degrees.
     venice.latitude, venice.longitude = -40.0, -140.0
     db_session.commit()
 
@@ -552,14 +491,13 @@ def test_sync_reports_an_unsupported_location_without_touching_saved_places(
     ) == 1
 
 
-# --- cancelling a download -------------------------------------------------
+# --- cancelling a download ---------------------------------------------------
 
 
 class _FakeStream:
-    """Stands in for httpx.stream: a 200 response of `chunks` 1-byte chunks.
+    """fake httpx.stream: a 200 response of `chunks` 1-byte chunks.
 
-    `on_chunk` runs as each chunk is handed out, which lets a test flip the
-    cancel flag partway through — the situation a real cancel is in.
+    `on_chunk` runs per chunk, so a test can cancel partway through.
     """
 
     status_code = 200
@@ -612,7 +550,7 @@ def test_a_cancelled_download_stops_and_removes_its_partial_file(
     with pytest.raises(ExtractCancelled):
         download_extract(REGION, cancel=cancel)
 
-    # Stopped at the chunk where the flag was set, not after all 100.
+    # stopped where the flag was set, not after all 100 chunks.
     assert len(handed_out) == 3
     partial = cached_extract.with_suffix(cached_extract.suffix + ".part")
     assert not partial.exists()
@@ -622,7 +560,7 @@ def test_a_cancelled_download_stops_and_removes_its_partial_file(
 def test_an_uncancelled_download_completes(
     cached_extract: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The same fake, never cancelled: proves the check does not misfire."""
+    """the same fake, never cancelled."""
     monkeypatch.setattr(extract_module, "find_region", lambda _: _testland_region())
     monkeypatch.setattr(
         extract_module.httpx, "stream", lambda *a, **k: _FakeStream(5, lambda _: None)
@@ -641,14 +579,14 @@ def test_a_cancelled_sync_cleans_up_instead_of_failing(
     cached_extract: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """No row left stuck at 'downloading', and no retryable-failure message."""
+    """nothing left stuck at "downloading", and no failure message."""
     import app.sync as sync_module
 
     venice.region = REGION
     db_session.commit()
 
     def cancelled_download(region: str, cancel: threading.Event) -> Path:
-        # While "downloading", the sync must have registered its cancel flag.
+        # the cancel flag is registered while downloading.
         assert sync_module._downloads.get(region) is cancel
         raise ExtractCancelled("cancelled")
 
@@ -660,7 +598,7 @@ def test_a_cancelled_sync_cleans_up_instead_of_failing(
     assert db_session.scalar(
         select(OsmExtract).where(OsmExtract.region == REGION)
     ) is None
-    # The flag is unregistered once the sync is over.
+    # and unregistered afterwards.
     assert REGION not in sync_module._downloads
 
     refreshed = db_session.get(Destination, venice.id)
@@ -676,11 +614,9 @@ def test_a_sync_cancelled_because_its_destination_was_deleted(
     cached_extract: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The real sequence: the destination is deleted *during* the download.
+    """the destination is deleted during the download.
 
-    The sync's own session still holds the destination it loaded at the start.
-    This caught a StaleDataError in the first version, which wrote "cancelled"
-    onto that stale copy and lost the cleanup with the failed commit.
+    regression test for a StaleDataError when writing to the stale copy.
     """
     import app.sync as sync_module
 
@@ -689,7 +625,7 @@ def test_a_sync_cancelled_because_its_destination_was_deleted(
     venice_id = venice.id
 
     def deleted_mid_download(region: str, cancel: threading.Event) -> Path:
-        # Another session — the DELETE request — removes it while we download.
+        # another session (the delete request) removes it mid-download.
         db_session.delete(db_session.get(Destination, venice_id))
         db_session.commit()
         raise ExtractCancelled("cancelled")

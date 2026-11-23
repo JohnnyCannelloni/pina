@@ -1,13 +1,11 @@
-# Postgres for local development.
+# postgres for local development.
 #
-# Two databases live in this one server: `pina` (what the app uses) and
-# `pina_test` (what pytest uses). The test database is created by
-# docker/init-test-db.sql the first time the container initialises its data
-# directory, so the integration tests never touch your real rows.
+# one server, two databases: `pina` for the app and `pina_test` for pytest
+# (created by docker/init-test-db.sql on first start).
 #
-#   docker compose up -d     start it
-#   docker compose down      stop it, keep the data
-#   docker compose down -v   stop it and throw the data away (fresh start)
+#   docker compose up -d     start
+#   docker compose down      stop, keep the data
+#   docker compose down -v   stop and delete the data
 services:
   db:
     image: postgres:17
@@ -17,16 +15,15 @@ services:
       POSTGRES_PASSWORD: pina
       POSTGRES_DB: pina
     ports:
-      # host:container — the app connects to localhost:5432.
+      # host:container
       - "5432:5432"
     volumes:
-      # Named volume, so stopping the container does not lose your places.
+      # named volume, so data survives restarts.
       - pgdata:/var/lib/postgresql/data
-      # Scripts in this directory run ONCE, on first initialisation only.
+      # runs once, on first initialisation.
       - ./docker/init-test-db.sql:/docker-entrypoint-initdb.d/init-test-db.sql:ro
     healthcheck:
-      # `docker compose up -d --wait` blocks until this passes, which is what
-      # stops `alembic upgrade head` from racing a database that is still booting.
+      # lets `docker compose up -d --wait` block until postgres is ready.
       test: ["CMD-SHELL", "pg_isready -U pina -d pina"]
       interval: 2s
       timeout: 3s

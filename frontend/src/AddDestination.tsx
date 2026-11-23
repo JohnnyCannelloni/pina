@@ -1,11 +1,6 @@
 /**
- * Add any city to a trip: type a name, pick from the matches, done.
- *
- * This is what makes Pina a planner rather than a Venice demo. The two-step
- * shape — search, then choose — is deliberate. "Venice" is a real place in
- * Italy, Florida and California, and "Springfield" is a real place in about
- * thirty US states. Taking the first match silently is how a trip ends up on
- * the wrong continent, so the full label is shown and the user decides.
+ * add a city to a trip: search, then pick from the matches. several are
+ * shown with their full label, since names like "venice" are ambiguous.
  */
 
 import { useState } from "react";
@@ -53,13 +48,10 @@ export function AddDestination({
 
   async function handleChoose(candidate: GeocodeCandidate) {
     setError(null);
-    // Track which row is in flight, so only that button shows a spinner rather
-    // than every candidate going grey.
+    // which row is saving, so only that button shows progress.
     setCreating(candidate.osm_ref);
     try {
-      // display_name is the picker's label, not part of the destination, so it
-      // is dropped here. Everything else — centre, bounds, osm_ref — is sent
-      // back exactly as the geocoder returned it.
+      // display_name is only the picker's label; the rest goes back as returned.
       const { display_name: _label, ...newDestination } = candidate;
       const created = await createDestination(tripId, newDestination);
 
@@ -68,8 +60,7 @@ export function AddDestination({
       setQuery("");
       setCandidates(null);
     } catch (caught) {
-      // Includes the 409 when this city is already on the trip, which is a
-      // perfectly normal thing to do by accident.
+      // includes the 409 when the city is already on the trip.
       setError(
         caught instanceof Error ? caught.message : "Could not add that.",
       );
@@ -104,8 +95,7 @@ export function AddDestination({
             onChange={(event) => setQuery(event.target.value)}
             placeholder="Lisbon"
             autoComplete="off"
-            // autoFocus is right here: the panel only appears because the user
-            // pressed "Add a destination", so typing is unambiguously next.
+            // the panel only opens when the user wants to type.
             autoFocus
           />
         </label>
@@ -142,8 +132,7 @@ export function AddDestination({
                 disabled={creating !== null}
               >
                 <span className="candidate__name">{candidate.name}</span>
-                {/* The full label is the whole point of showing a list — it is
-                    what distinguishes Venice, Italy from Venice, Florida. */}
+                {/* the full label tells venice, italy from venice, florida. */}
                 <span className="candidate__where">
                   {candidate.display_name}
                 </span>

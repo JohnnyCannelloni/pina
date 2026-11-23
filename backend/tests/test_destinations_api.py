@@ -1,9 +1,4 @@
-"""Tests for geocoding and adding destinations.
-
-This is what makes Pina a planner for *any* city rather than a Venice demo. No
-test touches the network: the Nominatim client and the sync runner are both
-dependency overrides from conftest.py.
-"""
+"""geocoding and adding, polling, retrying and deleting destinations."""
 
 import threading
 
@@ -38,24 +33,18 @@ LISBON = GeocodeResult(
 )
 
 
-# --- parsing Nominatim's awkward format ------------------------------------
+# --- parsing nominatim's format ----------------------------------------------
 
 
 def test_parse_results_converts_nominatims_bbox_order() -> None:
-    """Nominatim's boundingbox is strings, in [S, N, W, E] order.
-
-    Everything else in this project uses south/west/north/east. Reading
-    Nominatim's array positionally without noticing gives a box with north and
-    west swapped — which looks plausible and then violates
-    ck_destinations_bbox_ordered in the database. This test pins the conversion.
-    """
+    """nominatim's boundingbox is strings in [s, n, w, e] order; we convert it."""
     results = parse_results(
         [
             {
                 "display_name": "Venice, Veneto, Italy",
                 "lat": "45.4371",
                 "lon": "12.3326",
-                # min_lat, max_lat, min_lon, max_lon — as strings.
+                # min_lat, max_lat, min_lon, max_lon, as strings.
                 "boundingbox": ["45.4097", "45.4571", "12.2890", "12.3615"],
                 "osm_type": "relation",
                 "osm_id": 44915,
@@ -73,13 +62,13 @@ def test_parse_results_converts_nominatims_bbox_order() -> None:
     assert venice.east == 12.3615
     assert venice.osm_ref == "relation/44915"
     assert venice.country_code == "it"
-    # Ordering holds, which is what the database will insist on.
+    # ordered the way the database requires.
     assert venice.north > venice.south
     assert venice.east > venice.west
 
 
 def test_parse_results_skips_malformed_entries() -> None:
-    """One bad candidate does not cost the user the good ones."""
+    """one bad candidate doesn't drop the good ones."""
     results = parse_results(
         [
             {"display_name": "No bbox", "lat": "1", "lon": "2", "osm_type": "node", "osm_id": 1},
@@ -96,17 +85,13 @@ def test_parse_results_skips_malformed_entries() -> None:
     assert [result.name for result in results] == ["Good"]
 
 
-# --- GET /api/geocode ------------------------------------------------------
+# --- GET /api/geocode --------------------------------------------------------
 
 
 def test_geocode_returns_candidates(
     client: TestClient, fake_geocoder: FakeGeocoder
 ) -> None:
-    """Several candidates come back, so the user picks.
-
-    "Venice" is a real place in Italy, Florida and California. Returning one
-    best guess is how a trip ends up on the wrong continent.
-    """
+    """several candidates come back, so the user picks."""
     fake_geocoder.results = [LISBON]
 
     response = client.get("/api/geocode", params={"q": "Lisbon"})
@@ -122,7 +107,7 @@ def test_geocode_returns_candidates(
 def test_geocode_503s_when_the_service_is_unavailable(
     client: TestClient, fake_geocoder: FakeGeocoder
 ) -> None:
-    """A geocoder outage is a 503 with a readable message, not a 500."""
+    """a geocoder outage is a readable 503."""
     fake_geocoder.error = GeocodeError("Could not reach the place lookup service.")
 
     response = client.get("/api/geocode", params={"q": "Lisbon"})
@@ -130,7 +115,7 @@ def test_geocode_503s_when_the_service_is_unavailable(
     assert "place lookup" in response.json()["detail"]
 
 
-# --- POST /api/trips/{id}/destinations -------------------------------------
+# --- POST /api/trips/{id}/destinations ---------------------------------------
 
 
 def _create_body(result: GeocodeResult) -> dict:
@@ -152,12 +137,7 @@ def test_create_destination_starts_a_sync(
     venice: Destination,
     sync_runner: RecordingSyncRunner,
 ) -> None:
-    """Adding a city returns immediately and schedules the fetch.
-
-    `sync_state='pending'` plus a resolved `region` is the contract the UI
-    relies on: it can say *which* country it is about to download before any
-    bytes move.
-    """
+    """adding a city returns straight away, pending, with its region resolved."""
     response = client.post(
         f"/api/trips/{venice.trip_id}/destinations", json=_create_body(LISBON)
     )
@@ -167,20 +147,17 @@ def test_create_destination_starts_a_sync(
     assert body["name"] == "Lisbon"
     assert body["sync_state"] == SyncState.PENDING
     assert body["osm_place_count"] == 0
-    # Resolved from the coordinates against Geofabrik's real index, so an
-    # unsupported location is reported at creation rather than minutes later.
-    # Note the id is Geofabrik's own ("portugal"), not a continent-prefixed
-    # path — see the normalisation step in migration 0005.
+    # geofabrik's own id ("portugal"), resolved from the coordinates.
     assert body["region"] == "portugal"
 
-    # The sync was handed to the background, for this destination.
+    # the sync was scheduled for this destination.
     assert sync_runner.started == [body["id"]]
 
 
 def test_create_destination_clamps_an_oversized_area(
     client: TestClient, venice: Destination, sync_runner: RecordingSyncRunner
 ) -> None:
-    """A continent-sized bbox is cut down before anything is cached."""
+    """a continent-sized box is clamped."""
     tokyo = GeocodeResult(
         display_name="Tokyo, Japan",
         name="Tokyo",
@@ -207,7 +184,7 @@ def test_create_destination_clamps_an_oversized_area(
 def test_adding_the_same_city_twice_is_a_conflict(
     client: TestClient, venice: Destination, sync_runner: RecordingSyncRunner
 ) -> None:
-    """ix_destinations_trip_osm_ref refuses a duplicate; the API says 409."""
+    """adding the same city twice is a 409."""
     body = _create_body(LISBON)
     first = client.post(f"/api/trips/{venice.trip_id}/destinations", json=body)
     assert first.status_code == 201, first.text
@@ -220,7 +197,7 @@ def test_adding_the_same_city_twice_is_a_conflict(
 def test_create_destination_rejects_an_inverted_box(
     client: TestClient, venice: Destination, sync_runner: RecordingSyncRunner
 ) -> None:
-    """north below south is a 422 before anything is written."""
+    """north below south is a 422."""
     body = _create_body(LISBON) | {"north": 38.60}  # below south=38.69
 
     response = client.post(f"/api/trips/{venice.trip_id}/destinations", json=body)
@@ -234,13 +211,13 @@ def test_create_destination_404s_for_an_unknown_trip(
     assert response.status_code == 404, response.text
 
 
-# --- GET /api/destinations/{id} and POST .../sync --------------------------
+# --- GET /api/destinations/{id} and POST .../sync ----------------------------
 
 
 def test_get_destination_reports_cache_status(
     client: TestClient, venice: Destination
 ) -> None:
-    """What the UI polls while the cache fills."""
+    """the detail the ui polls while syncing."""
     response = client.get(f"/api/destinations/{venice.id}")
     assert response.status_code == 200, response.text
 
@@ -248,7 +225,7 @@ def test_get_destination_reports_cache_status(
     assert body["name"] == "Venice"
     assert body["sync_state"] == SyncState.PENDING
     assert "osm_place_count" in body and "region" in body
-    # The seeded destination has a real area, from migration 0003's backfill.
+    # the seeded destination's area comes from migration 0003.
     assert body["north"] > body["south"]
     assert body["east"] > body["west"]
 
@@ -256,13 +233,10 @@ def test_get_destination_reports_cache_status(
 def test_get_destination_reports_extract_state(
     client: TestClient, venice: Destination, db_session: Session
 ) -> None:
-    """A destination with a region reports its extract's state.
+    """a destination with a region reports its extract's state.
 
-    This test exists because its absence hid a NameError: `extract_state` is
-    only evaluated when the destination *has* a region, and every other test
-    polled the seeded Venice, which has none. The guard meant a missing import
-    produced a 500 that the whole suite stepped over. A conditional branch no
-    test enters is a branch that is not tested.
+    regression test: this branch once hid a NameError because no test used a
+    destination with a region.
     """
     venice.region = "europe/italy"
     db_session.add(
@@ -287,11 +261,7 @@ def test_resync_reschedules_the_import(
     venice: Destination,
     sync_runner: RecordingSyncRunner,
 ) -> None:
-    """Retry puts the destination back to pending and schedules a fresh run.
-
-    There is no tile state to reset any more: a cached extract is reused and a
-    partial download resumes, so re-running is simply safe.
-    """
+    """retry resets the destination to pending and schedules a new run."""
     response = client.post(f"/api/destinations/{venice.id}/sync")
     assert response.status_code == 200, response.text
     assert response.json()["sync_state"] == SyncState.PENDING
@@ -304,15 +274,8 @@ def test_an_unsupported_location_is_created_but_flagged(
     venice: Destination,
     sync_runner: RecordingSyncRunner,
 ) -> None:
-    """A country we have no extract for still gets a usable destination.
-
-    It is marked failed with an explanation rather than sitting at 'pending'
-    forever, and no import is scheduled because there is nothing to fetch. You
-    can still save places there by hand.
-    """
-    # Mid-Pacific. Region resolution is geographic now, so "unsupported" means
-    # "no Geofabrik region contains this point" rather than "unknown country
-    # code" — open ocean is the honest example.
+    """a point no region covers still gets a usable destination, marked failed."""
+    # mid-pacific: no geofabrik region contains it.
     nowhere = GeocodeResult(
         display_name="Point Nemo, Pacific Ocean",
         name="Point Nemo",
@@ -338,11 +301,11 @@ def test_an_unsupported_location_is_created_but_flagged(
     assert sync_runner.started == []
 
 
-# --- deleting ---------------------------------------------------------------
+# --- deleting ----------------------------------------------------------------
 
 
 def test_delete_a_destination(client: TestClient, venice: Destination) -> None:
-    """Gone from its own URL and from the trip list."""
+    """gone from its url and from the trip list."""
     response = client.delete(f"/api/destinations/{venice.id}")
     assert response.status_code == 204, response.text
     assert response.content == b""
@@ -371,7 +334,7 @@ def test_deleting_a_destination_deletes_its_saved_places(
 def test_deleting_a_destination_keeps_the_map_cache(
     client: TestClient, venice: Destination, db_session: Session
 ) -> None:
-    """osm_places is shared by the whole region, so it must survive a delete."""
+    """the shared osm cache survives a delete."""
     db_session.add(
         OsmPlace(
             source_ref="node/42",
@@ -401,7 +364,7 @@ def test_deleting_the_last_destination_in_a_region_cancels_its_download(
     db_session: Session,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Deleting a city added by mistake must not still download its region."""
+    """deleting the last destination in a region cancels its download."""
     import app.sync as sync_module
 
     venice.region = "europe/italy/nord-est"
@@ -420,7 +383,7 @@ def test_deleting_a_destination_keeps_a_download_another_one_needs(
     db_session: Session,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Mestre is in the same region as Venice, so its download carries on."""
+    """a sibling destination in the same region keeps the download going."""
     import app.sync as sync_module
 
     venice.region = "europe/italy/nord-est"

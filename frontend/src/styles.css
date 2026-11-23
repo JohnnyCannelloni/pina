@@ -1,12 +1,6 @@
 /*
- * Plain CSS, mobile-first. One breakpoint at 640px.
- *
- * No Tailwind or CSS-in-JS: this is one page, and a stylesheet you can read top
- * to bottom is worth more here than a build step and a utility vocabulary.
- *
- * Mobile-first means the unprefixed rules are the phone layout and the single
- * @media block adds the desktop changes. The other way round — desktop rules
- * plus max-width overrides — means every component is written twice.
+ * plain css, mobile-first. unprefixed rules are the phone layout; the one
+ * @media block at 640px adds the desktop changes.
  */
 
 :root {
@@ -37,11 +31,10 @@ body {
   line-height: 1.5;
 }
 
-/* --- layout ------------------------------------------------------------- */
+/* --- layout --------------------------------------------------------------- */
 
 .page {
-  /* max-width keeps text readable on a wide monitor; auto margins centre it.
-     The padding is the phone gutter. */
+  /* readable width on wide screens; the padding is the phone gutter. */
   max-width: 720px;
   margin: 0 auto;
   padding: 1rem 1rem 3rem;
@@ -57,8 +50,7 @@ body {
   line-height: 1.2;
 }
 
-/* Title on the left, its Delete on the right. Wraps under a long city name on
-   a narrow screen rather than squeezing it. */
+/* title left, delete right. wraps under a long name on narrow screens. */
 .page__titlerow {
   display: flex;
   flex-wrap: wrap;
@@ -83,12 +75,11 @@ body {
   border-radius: var(--radius);
   padding: 1rem;
   margin-bottom: 1rem;
-  /* Room above a card that "Show on map" scrolls to, so it does not land
-     flush against the top of the window. */
+  /* room above a card that "show on map" scrolls to. */
   scroll-margin-top: 1rem;
 }
 
-/* --- Ask Pina ----------------------------------------------------------- */
+/* --- ask pina ------------------------------------------------------------- */
 
 .chat__header {
   display: flex;
@@ -107,8 +98,7 @@ body {
   margin: 0 0 0.5rem;
 }
 
-/* The conversation scrolls inside the card, newest at the bottom, so a long
-   chat never pushes the map off the page. */
+/* the conversation scrolls inside the card, so the map stays put. */
 .chat__log {
   list-style: none;
   margin: 0 0 0.75rem;
@@ -133,8 +123,7 @@ body {
   max-width: 100%;
 }
 
-/* Your messages on the right, Pina's on the left — told apart by position
-   and shape as well as colour. */
+/* yours on the right, pina's on the left: position and shape, not just colour. */
 .chat__bubble--user {
   align-self: flex-end;
   max-width: 85%;
@@ -202,7 +191,7 @@ body {
   }
 }
 
-/* Result rows inside Pina's bubble keep their own white card. */
+/* result rows in pina's bubble keep a white card. */
 .chat__bubble--pina .ask__row {
   background: var(--surface);
 }
@@ -245,19 +234,18 @@ body {
   gap: 0.4rem;
 }
 
-/* Chips here are labels, not toggles. */
+/* labels here, not toggles. */
 .ask__chips .chip {
   cursor: default;
   min-height: 32px;
 }
 
-/* A feature that was asked for but nothing had: struck through, so it is
-   visibly *not* part of the results rather than silently ignored. */
+/* asked for but nothing had it: struck through. */
 .ask__chip--dropped {
   text-decoration: line-through;
 }
 
-/* A compact result: one row of name + summary, with details on demand. */
+/* a compact result: name and summary, details on demand. */
 .ask__row {
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -275,7 +263,7 @@ body {
   padding-right: 0.5rem;
 }
 
-/* The whole head is the expand toggle, so it is one big target. */
+/* the whole head toggles, so it's one big target. */
 .ask__toggle {
   flex: 1;
   min-width: 0;
@@ -301,8 +289,7 @@ body {
   outline-offset: -2px;
 }
 
-/* One line each, cut with an ellipsis: a row stays one glance tall however
-   long the name or the cuisine list is. */
+/* one line each, with an ellipsis. */
 .ask__toggle .place__name,
 .ask__toggle .place__meta {
   display: block;
@@ -339,7 +326,7 @@ body {
   font-weight: 650;
 }
 
-/* --- place details (PlaceInfo) ---------------------------------------- */
+/* --- place details (PlaceInfo) -------------------------------------------- */
 
 .info {
   display: flex;
@@ -351,7 +338,7 @@ body {
 
 .info__muted {
   color: var(--ink-muted);
-  /* Opening hours can be long; wrap rather than widen a popup off-screen. */
+  /* long opening hours wrap instead of widening the popup. */
   overflow-wrap: anywhere;
 }
 
@@ -376,7 +363,7 @@ body {
   margin-top: 0.15rem;
 }
 
-/* Leaflet's popup stylesheet colours every link its own blue. */
+/* leaflet's popup css colours every link blue. */
 .leaflet-popup-content .info a {
   color: var(--accent);
 }
@@ -385,14 +372,14 @@ body {
   margin-top: 0.35rem;
 }
 
-/* --- form --------------------------------------------------------------- */
+/* --- form ----------------------------------------------------------------- */
 
 .form__title {
   margin: 0 0 0.75rem;
   font-size: 1.0625rem;
 }
 
-/* Phone: fields stack. The media query at the bottom puts them on a row. */
+/* fields stack on a phone and sit in a row on desktop. */
 .form__row {
   display: flex;
   flex-direction: column;
@@ -412,9 +399,7 @@ body {
 }
 
 .field__input {
-  /* 16px minimum. Below this, iOS Safari zooms the whole page in when the
-     field is focused and does not zoom back out. It is a layout bug that only
-     reproduces on a real phone. */
+  /* at least 16px, or ios safari zooms in on focus and stays zoomed. */
   font: inherit;
   font-size: 1rem;
   padding: 0.625rem 0.75rem;
@@ -422,7 +407,7 @@ body {
   border-radius: 8px;
   background: var(--surface);
   color: var(--ink);
-  /* 44px total height — the minimum comfortable touch target. */
+  /* 44px tall, a comfortable touch target. */
   min-height: 44px;
   width: 100%;
 }
@@ -437,7 +422,7 @@ body {
   align-items: center;
   gap: 0.5rem;
   margin: 0.75rem 0;
-  /* The whole label is the tap target, not just the 13px box. */
+  /* the whole label is the tap target. */
   min-height: 44px;
   cursor: pointer;
   user-select: none;
@@ -458,7 +443,7 @@ body {
   border-radius: 8px;
   padding: 0.75rem 1rem;
   min-height: 44px;
-  /* Full width on a phone, where a thumb-sized target matters most. */
+  /* full width on a phone. */
   width: 100%;
   cursor: pointer;
 }
@@ -493,7 +478,7 @@ body {
   cursor: pointer;
 }
 
-/* --- pin picker --------------------------------------------------------- */
+/* --- pin picker ----------------------------------------------------------- */
 
 .picker__wrap {
   border-top: 1px solid var(--line);
@@ -501,8 +486,7 @@ body {
 }
 
 .picker__map {
-  /* Leaflet needs an explicit height on its container — it cannot infer one,
-     and a height of 0 renders an invisible map with no error. */
+  /* leaflet needs an explicit height, or the map is invisible. */
   height: 220px;
   width: 100%;
   border-radius: 8px;
@@ -529,7 +513,7 @@ body {
   color: var(--ink-muted);
 }
 
-/* --- toggle ------------------------------------------------------------- */
+/* --- toggle --------------------------------------------------------------- */
 
 .toggle {
   display: flex;
@@ -545,8 +529,7 @@ body {
   font: inherit;
   font-size: 0.9375rem;
   font-weight: 600;
-  /* flex: 1 splits the width evenly, so both tabs are full-size touch targets
-     on a phone rather than two small words. */
+  /* equal halves, so both tabs are full-size targets on a phone. */
   flex: 1;
   min-height: 40px;
   border: none;
@@ -562,7 +545,7 @@ body {
   box-shadow: 0 1px 2px rgb(0 0 0 / 0.08);
 }
 
-/* --- places list -------------------------------------------------------- */
+/* --- places list ---------------------------------------------------------- */
 
 .places {
   list-style: none;
@@ -580,9 +563,8 @@ body {
   padding: 0.75rem;
   border: 1px solid var(--line);
   border-radius: 8px;
-  /* Set explicitly because a <button> does not inherit these, and pinned rows
-     are buttons while unpinned rows are divs. Without this the two kinds of row
-     would not look alike. */
+  /* buttons don't inherit these, and pinned rows are buttons while unpinned
+     rows are divs. */
   width: 100%;
   background: var(--surface);
   font: inherit;
@@ -590,8 +572,7 @@ body {
   text-align: left;
 }
 
-/* A row and its Delete button side by side. The row takes the space; min-width
-   lets a long place name shrink instead of pushing the button off-screen. */
+/* a row with its actions beside it. min-width lets a long name shrink. */
 .places__item {
   display: flex;
   align-items: center;
@@ -603,8 +584,7 @@ body {
   min-width: 0;
 }
 
-/* Photos above Delete, beside the row. Stacked rather than side by side so a
-   phone-width row keeps most of its width for the place name. */
+/* photos above delete, so the row keeps its width for the name. */
 .place__actions {
   display: flex;
   flex-direction: column;
@@ -613,7 +593,7 @@ body {
 }
 
 .place__actions > * {
-  /* Two stacked 36px targets: the pair is about one row tall. */
+  /* two stacked 36px targets, about one row tall. */
   min-height: 36px;
   display: inline-flex;
   align-items: center;
@@ -662,8 +642,7 @@ body {
 .place__body {
   display: flex;
   flex-direction: column;
-  /* min-width: 0 lets a long name truncate instead of stretching the row and
-     pushing the badge off screen. A flex item's default min-width is auto. */
+  /* lets a long name truncate instead of pushing the badge off screen. */
   min-width: 0;
   flex: 1;
 }
@@ -697,7 +676,7 @@ body {
   color: var(--must-go-ink);
 }
 
-/* --- map controls: filter chips, search, legend -------------------------- */
+/* --- map controls: filter chips, search, legend ---------------------------- */
 
 .mapview__controls {
   display: flex;
@@ -718,9 +697,7 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 0.35rem;
-  /* 40px, slightly under the 44px of primary targets: three chips at 44px plus
-     the search button crowds a 375px screen, and these are low-risk toggles
-     rather than destructive or final actions. */
+  /* 40px: slightly under the usual 44px so the chips fit on a 375px screen. */
   min-height: 40px;
   padding: 0 0.75rem;
   border: 1px solid var(--line);
@@ -730,8 +707,7 @@ body {
   cursor: pointer;
 }
 
-/* The "on" state carries three independent signals — fill, border, and text
-   weight — so it does not depend on colour perception alone. */
+/* "on" differs by fill, border and weight, not colour alone. */
 .chip--on {
   background: #e6f4f1;
   border-color: var(--accent);
@@ -755,8 +731,7 @@ body {
   background: var(--surface);
   color: var(--accent);
   border: 1px solid var(--accent);
-  /* Overrides the base .button's full-width phone rule: this sits in a row
-     next to its own status text. */
+  /* overrides the full-width phone button; it sits beside its status text. */
   width: auto;
 }
 
@@ -799,7 +774,7 @@ body {
   height: 22px;
 }
 
-/* Mirrors the suggestion divIcon from leafletIcons.ts. */
+/* mirrors the suggestion icon in leafletIcons.ts. */
 .legend__suggestion {
   width: 15px;
   height: 15px;
@@ -809,16 +784,10 @@ body {
   border: 2px solid var(--accent);
 }
 
-/* --- map view ----------------------------------------------------------- */
+/* --- map view ------------------------------------------------------------- */
 
 .mapview__map {
-  /* dvh = dynamic viewport height, which accounts for mobile browser chrome
-     that appears and disappears while scrolling. Plain vh is the taller
-     "largest" viewport, so on iOS Safari the bottom of the map ends up behind
-     the toolbar. */
-  /* Taller than the first version. The map is now a tool you work in — pan,
-     search, tap markers — rather than a picture of your pins, so it earns the
-     vertical space. */
+  /* dvh tracks mobile browser chrome, so the map isn't hidden behind it. */
   height: 65dvh;
   min-height: 360px;
   width: 100%;
@@ -836,7 +805,7 @@ body {
   margin-top: 0.75rem;
 }
 
-/* Leaflet draws its own popup chrome; these style the content inside it. */
+/* content inside leaflet's popups. */
 .popup__name,
 .popup__meta,
 .popup__must-go,
@@ -867,16 +836,13 @@ body {
   color: var(--ink-muted);
 }
 
-/* The divIcon wrapper from leafletIcons.ts. Leaflet gives divIcons a white
-   background and a border by default, which would box in the SVG pin. */
+/* the divIcon wrapper; drop leaflet's default white box. */
 .pina-marker {
   background: none;
   border: none;
 }
 
-/* Suggestion markers: a hollow circle, visually lighter than a saved pin
-   because it is not yours yet. Re-adding a background and border here, having
-   stripped them above, is intentional — this marker *is* the circle. */
+/* suggestion markers: a hollow circle, lighter than a saved pin. */
 .pina-suggestion {
   display: flex;
   align-items: center;
@@ -897,8 +863,7 @@ body {
   line-height: 1;
 }
 
-/* An Ask Pina result: the same circle, bigger (set in leafletIcons.ts) with a
-   thicker ring and a filled background — size and weight, not colour alone. */
+/* an ask pina result: bigger (see leafletIcons.ts), thicker ring, filled. */
 .pina-suggestion--ask {
   border-width: 4px;
   background: #e6f4f1;
@@ -909,9 +874,8 @@ body {
   font-size: 16px;
 }
 
-/* Cluster bubbles for a zoomed-out view. Sized inline by leafletIcons.ts, so
-   this only has to supply the look. Semi-transparent so the map underneath
-   still reads as a place rather than being hidden behind discs. */
+/* cluster bubbles, sized inline by leafletIcons.ts. semi-transparent so the
+   map shows through. */
 .pina-cluster {
   display: flex;
   align-items: center;
@@ -933,18 +897,17 @@ body {
   font-size: 0.8125rem;
   font-weight: 700;
   line-height: 1;
-  /* Tabular figures stop the label jiggling as counts change between pans. */
+  /* tabular figures, so the label doesn't jiggle between pans. */
   font-variant-numeric: tabular-nums;
 }
 
-/* --- suggestion popup --------------------------------------------------- */
+/* --- suggestion popup ----------------------------------------------------- */
 
 .popup__checkbox {
   display: flex;
   align-items: center;
   gap: 0.4rem;
-  /* Leaflet's popup stylesheet sets its own margins on children; this wins
-     because styles.css is imported after leaflet.css in main.tsx. */
+  /* wins over leaflet's margins because this file loads after leaflet.css. */
   margin: 0.5rem 0 0;
   min-height: 32px;
   cursor: pointer;
@@ -985,7 +948,7 @@ body {
   color: var(--error-ink);
 }
 
-/* --- destinations -------------------------------------------------------- */
+/* --- destinations --------------------------------------------------------- */
 
 .destinations {
   display: flex;
@@ -1072,7 +1035,7 @@ body {
   color: var(--accent);
 }
 
-/* --- sync status --------------------------------------------------------- */
+/* --- sync status ---------------------------------------------------------- */
 
 .sync {
   display: flex;
@@ -1098,8 +1061,7 @@ body {
 }
 
 .sync__hint {
-  /* Full width, so the explanation sits under the headline rather than
-     competing with it for horizontal space on a phone. */
+  /* full width, so the explanation sits under the headline. */
   flex-basis: 100%;
   color: var(--ink-muted);
 }
@@ -1120,13 +1082,10 @@ body {
   }
 }
 
-/* --- marker labels ------------------------------------------------------- */
+/* --- marker labels -------------------------------------------------------- */
 
-/* Leaflet draws tooltips with a white box, border, and a little pointer arrow.
-   For a permanent label on every marker that is far too heavy, so this strips
-   it back to plain text with a halo. The halo (via text-shadow in every
-   direction) is what keeps the name readable over both pale water and dark
-   buildings — a solid background would hide the map instead. */
+/* leaflet tooltips stripped to plain text with a halo, readable over both
+   water and buildings. */
 .leaflet-tooltip.marker-label {
   background: none;
   border: none;
@@ -1143,12 +1102,12 @@ body {
   white-space: nowrap;
 }
 
-/* Leaflet adds the arrow as a ::before pseudo-element per direction. */
+/* leaflet adds the arrow as a ::before per direction. */
 .leaflet-tooltip.marker-label::before {
   display: none;
 }
 
-/* --- states ------------------------------------------------------------- */
+/* --- states --------------------------------------------------------------- */
 
 .empty {
   border: 1px dashed var(--line);
@@ -1172,9 +1131,7 @@ body {
   color: var(--ink-muted);
 }
 
-/* Visible to screen readers, invisible on screen. Used for the filter chips'
-   shown/hidden state. `display: none` would hide it from assistive technology
-   too, which defeats the purpose — hence the clip-rect approach. */
+/* visible to screen readers only. display: none would hide it from them too. */
 .sr-only {
   position: absolute;
   width: 1px;
@@ -1203,14 +1160,14 @@ body {
   color: var(--ink-muted);
 }
 
-/* --- desktop ------------------------------------------------------------ */
+/* --- desktop -------------------------------------------------------------- */
 
 @media (min-width: 640px) {
   .page {
     padding: 2rem 1.5rem 4rem;
   }
 
-  /* Name and category side by side, with the name taking the slack. */
+  /* name and category side by side. */
   .form__row {
     flex-direction: row;
     align-items: flex-end;
@@ -1220,20 +1177,19 @@ body {
     flex: 1;
   }
 
-  /* Enough room for the longest label, "Restaurant". */
+  /* room for the longest label, "Restaurant". */
   .form__row .field:not(.field--grow) {
     min-width: 11rem;
   }
 
-  /* A full-width button is a phone affordance; on desktop it just looks
-     unfinished. */
+  /* full-width buttons are a phone thing. */
   .button {
     width: auto;
     align-self: flex-start;
   }
 
   .toggle {
-    /* Tabs no longer need to fill the width once there is a mouse. */
+    /* tabs don't need to fill the width on desktop. */
     display: inline-flex;
   }
 
@@ -1246,7 +1202,7 @@ body {
     height: 300px;
   }
 
-  /* Search field and button side by side once there is room. */
+  /* search field and button side by side. */
   .adddest__search {
     flex-direction: row;
     align-items: flex-end;
@@ -1257,12 +1213,11 @@ body {
   }
 
   .mapview__map {
-    /* Must stay above the 65dvh base rule, or desktop would get a *shorter*
-       map than a phone. Caught by eye after raising the base height. */
+    /* must stay above the 65dvh base rule. */
     height: 70dvh;
   }
 
-  /* Chips and the search button share a row once there is width for it. */
+  /* chips and the search button share a row. */
   .mapview__controls {
     flex-direction: row;
     align-items: center;
@@ -1271,8 +1226,7 @@ body {
   }
 }
 
-/* Respect a user's reduced-motion setting. Leaflet animates pan and zoom by
-   default, which can trigger motion sickness. */
+/* respect reduced motion; leaflet animates pan and zoom by default. */
 @media (prefers-reduced-motion: reduce) {
   * {
     animation-duration: 0.01ms !important;

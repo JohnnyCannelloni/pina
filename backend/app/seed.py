@@ -1,17 +1,6 @@
-"""Seed the one trip and one destination this version of Pina works with.
+"""seed a starter trip (italy -> venice). run with `python -m app.seed`.
 
-Run it after migrating:
-    python -m app.seed
-
-Why this is a script and not part of the migration: migrations describe the
-*schema*, and mixing rows into them makes them non-rerunnable (the second
-`alembic upgrade head` on a fresh database would try to insert Venice twice) and
-quietly ties your test fixtures to schema history. Keeping seeds separate means
-you can reseed without migrating and migrate without reseeding.
-
-It is **idempotent** — look-then-insert, so running it ten times still leaves
-one Italy and one Venice. That matters because the test suite calls seed() for
-every test.
+idempotent, so it's safe to run more than once. the tests call it too.
 """
 
 from sqlalchemy import select
@@ -23,38 +12,22 @@ from app.models import Destination, Trip
 TRIP_NAME = "Italy"
 DESTINATION_NAME = "Venice"
 
-# Where the map opens. Roughly the Rialto, which keeps the whole of the historic
-# centre in view at the zoom the UI uses.
+# map centre, roughly the rialto.
 VENICE_LATITUDE = 45.4408
 VENICE_LONGITUDE = 12.3155
 
-# The area whose places get synced from OpenStreetMap. Deliberately the same
-# half-span the 0003 migration used to backfill existing destinations, so a
-# seeded Venice and a migrated Venice are identical — otherwise re-seeding an
-# already-migrated database would quietly move the boundary and orphan tiles.
-#
-# Venice is seeded with explicit coordinates rather than geocoded, because the
-# seed has to work with no network. Every *other* destination gets its area from
-# Nominatim via the add-destination flow; this is the one hardcoded case, and
-# it exists only so a fresh database has something in it.
+# same half-span migration 0003 used for its backfill. hardcoded so seeding
+# works offline; other destinations get their area from the geocoder.
 VENICE_HALF_SPAN = 0.06
 
 
 def seed(db: Session) -> Destination:
-    """Ensure Italy -> Venice exists; return the Venice destination.
-
-    Takes a Session rather than making its own, so the tests can run it inside
-    their own transaction and roll it back. A function that creates its own
-    session is a function you cannot reuse.
-    """
+    """make sure italy -> venice exists and return venice. the caller commits."""
     trip = db.scalar(select(Trip).where(Trip.name == TRIP_NAME))
     if trip is None:
         trip = Trip(name=TRIP_NAME)
         db.add(trip)
-        # flush sends the INSERT so the database assigns trip.id, without
-        # committing. We need that id for the destination's foreign key below.
-        # (commit would also work, but then a failure halfway through would
-        # leave a trip with no destination.)
+        # flush to get trip.id without committing a half-seeded trip.
         db.flush()
 
     destination = db.scalar(
@@ -83,7 +56,6 @@ def seed(db: Session) -> Destination:
 def main() -> None:
     with SessionLocal() as db:
         destination = seed(db)
-        # The caller commits, not seed() — same reason seed() takes a Session.
         db.commit()
         print(
             f"Seeded: {TRIP_NAME} -> {DESTINATION_NAME} "

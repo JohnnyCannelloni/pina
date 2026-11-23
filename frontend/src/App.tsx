@@ -1,13 +1,6 @@
 /**
- * Loads the trip, then renders its destination page.
- *
- * This indirection exists so that no destination id and no coordinate is
- * hardcoded in the frontend. The app asks the API what trips exist, and the API
- * answers with Italy, Venice, and Venice's position. Adding a second city
- * becomes a change to seed.py, not to this file.
- *
- * There is no router: one trip, one destination, one page. When there are two
- * destinations this grows a list and react-router earns its place — not before.
+ * loads the trips and renders the first one. ids and coordinates come from the
+ * api, so nothing is hardcoded here.
  */
 
 import { useEffect, useState } from "react";
@@ -30,9 +23,8 @@ export function App() {
         if (!active) {
           return;
         }
-        // trips[0] is `Trip | undefined` because of noUncheckedIndexedAccess in
-        // tsconfig — which is the point of that flag. An unseeded database is a
-        // real state, and it gets a real message below instead of a crash.
+        // possibly undefined (noUncheckedIndexedAccess): an unseeded database
+        // gets a message below instead of a crash.
         setTrip(trips[0] ?? null);
       } catch (caught) {
         if (active) {
@@ -73,8 +65,7 @@ export function App() {
     );
   }
 
-  // Reached when the migration has run but `python -m app.seed` has not. Naming
-  // the exact command is more useful than "no data found".
+  // migrated but not seeded.
   if (!trip) {
     return (
       <main className="page">
@@ -89,7 +80,6 @@ export function App() {
     );
   }
 
-  // A trip with no destinations is now a normal state, not an error — TripPage
-  // handles it with an empty state and the add form.
+  // a trip with no destinations is handled by TripPage.
   return <TripPage trip={trip} />;
 }

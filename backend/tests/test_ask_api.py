@@ -1,9 +1,7 @@
-"""Tests for Ask Pina: POST /api/destinations/{id}/ask, and the pieces behind it.
+"""ask pina: POST /api/destinations/{id}/ask and the pieces behind it.
 
-No Ollama and no network. The LLM is a fake that returns a fixed SearchIntent
-— which is the honest boundary: what the model says is not ours to test, but
-everything we *do* with what it says is. The search runs for real, against
-rows in the rolled-back test database.
+the llm is a fake returning a fixed SearchIntent; the search runs for real
+against the test database. no ollama, no network.
 """
 
 from collections.abc import Generator
@@ -20,12 +18,12 @@ from app.main import app
 from app.models import Category, Destination, OsmPlace
 from app.schemas import Feature, SearchIntent
 
-# Central Venice, well inside the seeded destination's box.
+# central venice, inside the seeded destination's box.
 CENTER = (45.4408, 12.3155)
 
 
 class FakeLlm:
-    """Stands in for OllamaClient. Returns `intent`, or raises `error`."""
+    """stands in for OllamaClient. returns `intent`, or raises `error`."""
 
     def __init__(self) -> None:
         self.intent = SearchIntent()
@@ -88,18 +86,14 @@ def names(answer: dict) -> list[str]:
     return [result["name"] for result in answer["results"]]
 
 
-# --- what ------------------------------------------------------------------
+# --- what --------------------------------------------------------------------
 
 
 def test_cuisine_matches_by_tag_or_by_name(
     client: TestClient, db_session: Session, venice: Destination,
     fake_llm: FakeLlm, fake_geocoder: object,
 ) -> None:
-    """Italian means tagged italian OR "trattoria" in the name.
-
-    The name fallback is the point: two thirds of restaurants have no cuisine
-    tag, so tag-only search would miss most of them.
-    """
+    """italian means tagged italian or "trattoria" in the name."""
     place(db_session, "node/1", "Da Mario", tags={"cuisine": ["italian", "pizza"]})
     place(db_session, "node/2", "Trattoria alla Rampa")  # no tags at all
     place(db_session, "node/3", "Sushi Bar", tags={"cuisine": ["sushi"]})
@@ -116,7 +110,7 @@ def test_cuisine_matches_by_tag_or_by_name(
     assert sorted(names(answer)) == ["Da Mario", "Trattoria alla Rampa"]
     assert answer["total"] == 2
     assert answer["area_label"] == "in Venice"
-    # The interpretation comes back for the UI's chips.
+    # the interpretation comes back for the ui's chips.
     assert answer["interpretation"]["cuisines"] == ["italian"]
 
 
@@ -124,8 +118,8 @@ def test_a_name_match_overrides_the_category_guess(
     client: TestClient, db_session: Session, venice: Destination,
     fake_llm: FakeLlm, fake_geocoder: object,
 ) -> None:
-    """Measured live: "pastéis de nata" came back as category=restaurant, which
-    hid the café named after them. A name that says it outright wins."""
+    """a name that says it outright beats the category guess (seen live with
+    "pastéis de nata")."""
     place(db_session, "node/1", "Fábrica de Pastéis de Nata", category="cafe",
           at=(CENTER[0] + 0.004, CENTER[1]))
     place(db_session, "node/2", "Tasca", tags={"cuisine": ["portuguese"]})
@@ -137,8 +131,8 @@ def test_a_name_match_overrides_the_category_guess(
 
     answer = ask(client, venice)
 
-    # The named café first despite being furthest; the tagged restaurant next.
-    # A café with only the cuisine tag is still excluded by the category.
+    # the named café first, then the tagged restaurant. a café with only the
+    # cuisine tag is still excluded by the category.
     assert names(answer) == ["Fábrica de Pastéis de Nata", "Tasca"]
 
 
@@ -146,8 +140,7 @@ def test_without_a_cuisine_name_words_rank_but_do_not_filter(
     client: TestClient, db_session: Session, venice: Destination,
     fake_llm: FakeLlm, fake_geocoder: object,
 ) -> None:
-    """"a vegan café": the model's "vegano" must not hide vegan cafés with
-    other names — measured live, it did."""
+    """without a cuisine, "vegano" ranks results but doesn't filter them."""
     place(db_session, "node/1", "Nicolau", category="cafe",
           tags={"diet:vegan": "yes"})
     place(db_session, "node/2", "Caffè Vegano", category="cafe",
@@ -158,7 +151,7 @@ def test_without_a_cuisine_name_words_rank_but_do_not_filter(
 
     answer = ask(client, venice)
 
-    # Both found; the name match ranks first even though it is further away.
+    # both found; the name match first even though it's further away.
     assert names(answer) == ["Caffè Vegano", "Nicolau"]
 
 
@@ -180,7 +173,7 @@ def test_every_feature_asked_for_must_be_present(
 
     answer = ask(client, venice)
 
-    # A vegan-only place counts as vegetarian; "no" and missing do not count.
+    # vegan-only counts as vegetarian; "no" and missing don't.
     assert sorted(names(answer)) == ["Both", "Vegan Only Terrace"]
     by_name = {result["name"]: result for result in answer["results"]}
     assert by_name["Both"]["details"]["features"] == ["outdoor_seating", "vegetarian"]
@@ -190,8 +183,8 @@ def test_features_nobody_has_are_dropped_and_reported(
     client: TestClient, db_session: Session, venice: Destination,
     fake_llm: FakeLlm, fake_geocoder: object,
 ) -> None:
-    """Seafood exists, seafood with a recorded terrace does not: show the
-    seafood, and say outdoor seating was dropped."""
+    """no seafood place has a recorded terrace: show the seafood and say the
+    feature was dropped."""
     place(db_session, "node/1", "Fish", tags={"cuisine": ["seafood"]})
     place(db_session, "node/2", "Pizza Terrace", tags={
         "cuisine": ["pizza"], "outdoor_seating": "yes"})
@@ -216,7 +209,7 @@ def test_nothing_at_all_drops_nothing(
     answer = ask(client, venice)
 
     assert answer["results"] == []
-    # Dropping the feature did not help, so it is not reported as dropped.
+    # dropping it didn't help, so it isn't reported as dropped.
     assert answer["dropped_features"] == []
 
 
@@ -232,7 +225,7 @@ def test_an_empty_intent_returns_the_closest_places_capped(
 
     assert answer["total"] == 30
     assert len(answer["results"]) == 25
-    # Closest to the centre first.
+    # closest to the centre first.
     assert names(answer)[:3] == ["Place 0", "Place 1", "Place 2"]
 
 
@@ -242,7 +235,7 @@ def test_the_model_is_offered_only_cuisines_in_this_destination(
 ) -> None:
     place(db_session, "node/1", "A", tags={"cuisine": ["italian"]})
     place(db_session, "node/2", "B", tags={"cuisine": ["italian", "seafood"]})
-    # Far outside Venice: its cuisine must not be offered.
+    # far outside venice, so its cuisine isn't offered.
     place(db_session, "node/3", "C", tags={"cuisine": ["thai"]}, at=(38.7, -9.1))
 
     ask(client, venice, question="fish please")
@@ -268,7 +261,7 @@ def test_saved_places_are_marked(
     assert answer["results"][0]["already_saved"] is True
 
 
-# --- where -----------------------------------------------------------------
+# --- where -------------------------------------------------------------------
 
 
 def test_a_named_area_narrows_the_search(
@@ -284,8 +277,7 @@ def test_a_named_area_narrows_the_search(
         GeocodeResult(
             display_name="Ponte di Rialto, Venezia", name="Ponte di Rialto",
             latitude=rialto[0], longitude=rialto[1],
-            # A bridge's own outline is tiny; the box must still take in the
-            # streets around it.
+            # a bridge's outline is tiny; the box still covers nearby streets.
             south=rialto[0] - 0.0002, west=rialto[1] - 0.0002,
             north=rialto[0] + 0.0002, east=rialto[1] + 0.0002,
             osm_ref="way/1", country_code="it",
@@ -297,7 +289,7 @@ def test_a_named_area_narrows_the_search(
     assert names(answer) == ["By The Bridge", "Two Streets Away"]
     assert answer["area_label"] == "near Rialto"
     assert answer["area_found"] is True
-    # Looked up inside Venice only.
+    # looked up inside venice only.
     assert fake_geocoder.queries == ["Rialto"]  # type: ignore[attr-defined]
     south, west, north, east = fake_geocoder.viewboxes[0]  # type: ignore[attr-defined]
     assert south < venice.south and north > venice.north
@@ -307,7 +299,7 @@ def test_the_city_under_another_name_searches_the_whole_city(
     client: TestClient, db_session: Session, venice: Destination,
     fake_llm: FakeLlm, fake_geocoder: object,
 ) -> None:
-    """"pizza in Venice" when the destination is called Venezia."""
+    """"pizza in venice" when the destination is called venezia."""
     place(db_session, "node/1", "Edge Of Town",
           at=(venice.south + 0.001, venice.west + 0.001))
     fake_llm.intent = SearchIntent(area="Venice")
@@ -331,8 +323,8 @@ def test_the_most_important_matching_area_wins(
     client: TestClient, db_session: Session, venice: Destination,
     fake_llm: FakeLlm, fake_geocoder: object,
 ) -> None:
-    """Measured in real Venice: Nominatim's first "Rialto" is a service road
-    on the mainland; the market everyone means comes fourth."""
+    """nominatim's first "rialto" in venice is a mainland road; the market
+    comes later but is more important."""
     market = (45.4396, 12.3345)
     place(db_session, "node/1", "By The Market", at=market)
     place(db_session, "node/2", "By The Road", at=(45.4720, 12.2113))
@@ -426,7 +418,7 @@ def test_unknown_destination_is_a_404(client: TestClient, fake_llm: FakeLlm) -> 
     assert response.status_code == 404
 
 
-# --- cleaning what the model says ----------------------------------------------
+# --- cleaning what the model says --------------------------------------------
 
 
 def test_clean_intent_keeps_only_what_the_data_can_answer() -> None:
@@ -442,9 +434,9 @@ def test_clean_intent_keeps_only_what_the_data_can_answer() -> None:
     cleaned = clean_intent(raw, city="Venice", cuisines=["italian", "pizza"])
 
     assert cleaned.cuisines == ["italian"]  # invented and duplicate dropped
-    # Lowercased, de-duplicated; generic, too-short and place-name words dropped.
+    # lowercased and deduped; generic, short and place-name words dropped.
     assert cleaned.name_words == ["trattoria", "osteria"]
-    # Naming the city itself is not an area within it.
+    # the city itself isn't an area within it.
     assert cleaned.area is None
 
 
@@ -491,8 +483,7 @@ def test_ollama_client_reads_a_structured_answer(
         category=Category.RESTAURANT, cuisines=["italian"],
         features=[Feature.OUTDOOR_SEATING], name_words=["trattoria"], area="Alfama",
     )
-    # The constraints are actually sent: no thinking pass, and a schema whose
-    # cuisine enum is this destination's list.
+    # no thinking pass, and the cuisine enum is this destination's list.
     assert sent["think"] is False
     assert sent["format"]["properties"]["cuisines"]["items"]["enum"] == ["italian"]
 
@@ -576,7 +567,7 @@ def test_a_follow_up_sends_the_previous_search_to_the_model(
     ask(client, venice, question="something new")
 
     assert fake_llm.previous[0] == SearchIntent.model_validate(previous)
-    # No previous means a fresh search, not "refine nothing".
+    # no previous means a fresh search.
     assert fake_llm.previous[1] is None
 
 
