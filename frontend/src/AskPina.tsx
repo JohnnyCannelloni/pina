@@ -1,17 +1,22 @@
 /**
- * Ask Pina: a question in plain words, real places back.
+ * Ask Pina, as a conversation: ask, get real places, ask a follow-up.
  *
- * READ THIS AFTER backend/app/llm.py and app/ask.py. The model only turns the
- * question into a search, so everything shown here is a real OpenStreetMap
- * place. The chips under the box are the model's interpretation, shown
- * deliberately: a small local model will sometimes misread a question, and
- * when it does you should be able to see that, not just get odd results.
+ * READ THIS AFTER backend/app/llm.py and app/ask.py. Chat-shaped, structured
+ * underneath:
  *
- * The answer is owned by DestinationPage, not by this component, because the
- * map draws it too — the same lifting-state-up as `places`.
+ *   - The model never writes about places. It turns each message into a
+ *     search, and every result is a real OpenStreetMap place.
+ *   - A follow-up sends the previous search along, so "only vegan ones"
+ *     *refines* it instead of starting over.
+ *   - Pina's reply sentence is written by the server from the results
+ *     (app/ask.py:describe), so it cannot claim what the data does not show.
+ *     A hosted model can write it later; this component would not change.
+ *
+ * The latest answer is owned by DestinationPage, not by this component,
+ * because the map draws it too. The conversation itself lives here.
  */
 
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 
 import { askPina, createPlace } from "./api";
 import { PlaceInfo } from "./PlaceInfo";
@@ -24,6 +29,7 @@ import {
   type Bounds,
   type DestinationDetail,
   type Place,
+  type SearchIntent,
   type Suggestion,
 } from "./types";
 
@@ -35,6 +41,7 @@ export const ASK_PAGE_SIZE = 5;
 interface AskPinaProps {
   destination: DestinationDetail;
   places: Place[];
+  /** The latest answer: the one whose results are listed and pinned. */
   answer: AskResponse | null;
   onAnswer: (answer: AskResponse | null) => void;
   /** How many results to show; owned by DestinationPage, which gives the map
@@ -47,7 +54,14 @@ interface AskPinaProps {
   onShowOnMap: (result: Suggestion) => void;
 }
 
-/** One ask is a few seconds; these give the box something to suggest. */
+/** One exchange. `answer` and `error` are both null while Pina is thinking. */
+interface Turn {
+  id: number;
+  question: string;
+  answer: AskResponse | null;
+  error: string | null;
+}
+
 const EXAMPLES = [
   "Italian with outdoor seating",
   "a vegan café",
@@ -65,9 +79,26 @@ export function AskPina({
   onSaved,
   onShowOnMap,
 }: AskPinaProps) {
+  const [turns, setTurns] = useState<Turn[]>([]);
   const [question, setQuestion] = useState("");
-  const [asking, setAsking] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const nextId = useRef(1);
+  const log = useRef<HTMLOListElement>(null);
+
+  const asking = turns.some((turn) => turn.answer === null && turn.error === null);
+
+  // A different destination is a different conversation.
+  useEffect(() => {
+    setTurns([]);
+  }, [destination.id]);
+
+  // Keep the newest message in view. The log scrolls, not the page: scrolling
+  // the page would yank the map away while you are looking at it.
+  useEffect(() => {
+    const element = log.current;
+    if (element) {
+      element.scrollTop = element.scrollHeight;
+    }
+  }, [turns]);
 
   // Derived from `places`, like the map's: saving a result marks it saved
   // here with no extra state.
@@ -75,21 +106,51 @@ export function AskPina({
     places.map((p) => p.source_ref).filter((ref): ref is string => ref !== null),
   );
 
+  /** The search a follow-up refines: the latest one that got an answer. A
+   *  failed turn does not reset the conversation. */
+  function previousSearch(): SearchIntent | null {
+    for (let i = turns.length - 1; i >= 0; i--) {
+      const turnAnswer = turns[i]?.answer;
+      if (turnAnswer) {
+        return turnAnswer.interpretation;
+      }
+    }
+    return null;
+  }
+
   async function ask(text: string) {
     const trimmed = text.trim();
     if (!trimmed || asking) {
       return;
     }
-    setAsking(true);
-    setError(null);
+    const id = nextId.current++;
+    const previous = previousSearch();
+    setTurns((current) => [
+      ...current,
+      { id, question: trimmed, answer: null, error: null },
+    ]);
+    setQuestion("");
+
+    const settle = (update: Partial<Turn>) =>
+      setTurns((current) =>
+        current.map((turn) => (turn.id === id ? { ...turn, ...update } : turn)),
+      );
+
     try {
-      onAnswer(await askPina(destination.id, trimmed, getViewport()));
+      const response = await askPina(
+        destination.id,
+        trimmed,
+        getViewport(),
+        previous,
+      );
+      settle({ answer: response });
+      onAnswer(response);
     } catch (caught) {
       // The 503 carries the command that fixes it ("brew services start
       // ollama"), so the server's message is shown as-is.
-      setError(caught instanceof Error ? caught.message : "Could not ask.");
-    } finally {
-      setAsking(false);
+      settle({
+        error: caught instanceof Error ? caught.message : "Could not ask.",
+      });
     }
   }
 
@@ -98,11 +159,75 @@ export function AskPina({
     void ask(question);
   }
 
+  function handleNewChat() {
+    setTurns([]);
+    onAnswer(null);
+  }
+
   return (
-    <div className="card ask">
-      <form className="ask__form" onSubmit={handleSubmit}>
+    <div className="card chat">
+      <div className="chat__header">
+        <h2 className="chat__title">Ask Pina</h2>
+        {turns.length > 0 && (
+          <button
+            type="button"
+            className="linkbutton"
+            onClick={handleNewChat}
+            disabled={asking}
+          >
+            New chat
+          </button>
+        )}
+      </div>
+
+      {turns.length === 0 ? (
+        <div className="chat__intro">
+          <p className="muted">
+            Ask for places in {destination.name} in your own words, then
+            follow up to narrow it down — “only ones with a terrace”, “what
+            about another area?”
+          </p>
+          <p className="ask__examples">
+            Try:{" "}
+            {EXAMPLES.map((example) => (
+              <button
+                key={example}
+                type="button"
+                className="chip"
+                onClick={() => void ask(example)}
+              >
+                {example}
+              </button>
+            ))}
+          </p>
+        </div>
+      ) : (
+        // aria-live: a screen reader announces Pina's replies as they arrive.
+        <ol className="chat__log" ref={log} aria-live="polite">
+          {turns.map((turn) => (
+            <li key={turn.id} className="chat__turn">
+              <p className="chat__bubble chat__bubble--user">{turn.question}</p>
+              <PinaMessage
+                turn={turn}
+                // Only the latest answer lists its results: they are the ones
+                // on the map. Earlier replies stay as a record of the search.
+                current={turn.answer !== null && turn.answer === answer}
+                destinationId={destination.id}
+                destinationName={destination.name}
+                savedRefs={savedRefs}
+                shown={shown}
+                onShowMore={onShowMore}
+                onSaved={onSaved}
+                onShowOnMap={onShowOnMap}
+              />
+            </li>
+          ))}
+        </ol>
+      )}
+
+      <form className="ask__form chat__composer" onSubmit={handleSubmit}>
         <label className="sr-only" htmlFor="ask-question">
-          Ask Pina
+          Message Pina
         </label>
         <input
           id="ask-question"
@@ -110,7 +235,11 @@ export function AskPina({
           type="text"
           value={question}
           maxLength={300}
-          placeholder={`Ask Pina — e.g. "pizza with a terrace near the centre"`}
+          placeholder={
+            previousSearch()
+              ? "Follow up — e.g. “only vegan ones”"
+              : "e.g. “pizza with a terrace near the centre”"
+          }
           onChange={(event) => setQuestion(event.target.value)}
           disabled={asking}
         />
@@ -119,60 +248,110 @@ export function AskPina({
           className="button"
           disabled={asking || !question.trim()}
         >
-          {asking ? "Thinking…" : "Ask"}
+          Send
         </button>
       </form>
+    </div>
+  );
+}
 
-      {!answer && !asking && error === null && (
-        <p className="ask__examples">
-          Try:{" "}
-          {EXAMPLES.map((example) => (
-            <button
-              key={example}
-              type="button"
-              className="chip"
-              onClick={() => {
-                setQuestion(example);
-                void ask(example);
-              }}
-            >
-              {example}
-            </button>
-          ))}
-        </p>
-      )}
+function PinaMessage({
+  turn,
+  current,
+  destinationId,
+  destinationName,
+  savedRefs,
+  shown,
+  onShowMore,
+  onSaved,
+  onShowOnMap,
+}: {
+  turn: Turn;
+  current: boolean;
+  destinationId: number;
+  destinationName: string;
+  savedRefs: Set<string>;
+  shown: number;
+  onShowMore: () => void;
+  onSaved: (place: Place) => void;
+  onShowOnMap: (result: Suggestion) => void;
+}) {
+  if (turn.error !== null) {
+    return (
+      <p className="chat__bubble chat__bubble--pina chat__bubble--error" role="alert">
+        {turn.error}
+      </p>
+    );
+  }
 
-      {asking && (
-        <p className="muted" role="status">
-          Reading your question… The model runs on this computer, so this takes
-          a few seconds — a bit longer for the first question.
-        </p>
-      )}
+  if (turn.answer === null) {
+    return (
+      <p className="chat__bubble chat__bubble--pina chat__thinking" role="status">
+        <span className="chat__dots" aria-hidden="true">
+          <span />
+          <span />
+          <span />
+        </span>
+        Thinking… (a few seconds — the model runs on this computer)
+      </p>
+    );
+  }
 
-      {error !== null && (
-        <p className="error" role="alert">
-          {error}
-        </p>
-      )}
-
-      {answer && !asking && (
-        <AskAnswer
+  const answer = turn.answer;
+  return (
+    <div className="chat__bubble chat__bubble--pina">
+      <p className="chat__reply">{answer.reply}</p>
+      <Understood answer={answer} />
+      {current && answer.results.length > 0 && (
+        <ResultList
           answer={answer}
-          destinationId={destination.id}
-          destinationName={destination.name}
+          destinationId={destinationId}
+          destinationName={destinationName}
           savedRefs={savedRefs}
           shown={shown}
           onShowMore={onShowMore}
           onSaved={onSaved}
           onShowOnMap={onShowOnMap}
-          onClear={() => onAnswer(null)}
         />
       )}
     </div>
   );
 }
 
-function AskAnswer({
+/** What the model understood, as chips — so a wrong guess, or a follow-up
+ *  that dropped something you meant to keep, is spotted at a glance. */
+function Understood({ answer }: { answer: AskResponse }) {
+  const intent = answer.interpretation;
+  return (
+    <div className="ask__chips" aria-label="What Pina understood">
+      {intent.category && (
+        <span className="chip chip--on">
+          {CATEGORY_ICONS[intent.category]} {CATEGORY_LABELS[intent.category]}
+        </span>
+      )}
+      {intent.cuisines.map((cuisine) => (
+        <span key={cuisine} className="chip chip--on">
+          {formatCuisine(cuisine)}
+        </span>
+      ))}
+      {intent.features.map((feature) => (
+        <span
+          key={feature}
+          className={`chip ${
+            answer.dropped_features.includes(feature)
+              ? "ask__chip--dropped"
+              : "chip--on"
+          }`}
+        >
+          {FEATURE_LABELS[feature]}
+        </span>
+      ))}
+      <span className="chip chip--on">📍 {answer.area_label}</span>
+    </div>
+  );
+}
+
+function ResultList({
   answer,
   destinationId,
   destinationName,
@@ -181,7 +360,6 @@ function AskAnswer({
   onShowMore,
   onSaved,
   onShowOnMap,
-  onClear,
 }: {
   answer: AskResponse;
   destinationId: number;
@@ -191,11 +369,9 @@ function AskAnswer({
   onShowMore: () => void;
   onSaved: (place: Place) => void;
   onShowOnMap: (result: Suggestion) => void;
-  onClear: () => void;
 }) {
-  const { interpretation: intent } = answer;
   // One row open at a time: details for one place are useful, details for
-  // five at once are the wall of text this replaced.
+  // five at once are a wall of text.
   const [expandedRef, setExpandedRef] = useState<string | null>(null);
   useEffect(() => setExpandedRef(null), [answer]);
 
@@ -204,102 +380,41 @@ function AskAnswer({
 
   return (
     <div className="ask__answer">
-      {/* What the model understood. Chips, not prose, so a wrong guess is
-          spotted at a glance. */}
-      <div className="ask__chips" aria-label="What Pina understood">
-        {intent.category && (
-          <span className="chip chip--on">
-            {CATEGORY_ICONS[intent.category]} {CATEGORY_LABELS[intent.category]}
-          </span>
-        )}
-        {intent.cuisines.map((cuisine) => (
-          <span key={cuisine} className="chip chip--on">
-            {formatCuisine(cuisine)}
-          </span>
+      <p className="muted">
+        {visible.length < answer.total
+          ? `Showing the ${visible.length} closest of ${answer.total.toLocaleString()}.`
+          : "Closest first."}
+      </p>
+      <ul className="places">
+        {visible.map((result) => (
+          <AskResult
+            key={result.source_ref}
+            result={result}
+            destinationId={destinationId}
+            destinationName={destinationName}
+            saved={savedRefs.has(result.source_ref)}
+            expanded={expandedRef === result.source_ref}
+            onToggle={() =>
+              setExpandedRef((current) =>
+                current === result.source_ref ? null : result.source_ref,
+              )
+            }
+            onSaved={onSaved}
+            onShowOnMap={onShowOnMap}
+          />
         ))}
-        {intent.features.map((feature) => (
-          <span
-            key={feature}
-            className={`chip ${
-              answer.dropped_features.includes(feature)
-                ? "ask__chip--dropped"
-                : "chip--on"
-            }`}
-          >
-            {FEATURE_LABELS[feature]}
-          </span>
-        ))}
-        <span className="chip chip--on">📍 {answer.area_label}</span>
-        <button type="button" className="linkbutton" onClick={onClear}>
-          Clear
+      </ul>
+      {/* Only as far as the results already fetched — no new request. The
+          server sends the 25 closest; past that, a follow-up that narrows the
+          search beats a longer list. */}
+      {more > 0 && (
+        <button
+          type="button"
+          className="button button--secondary ask__more"
+          onClick={onShowMore}
+        >
+          Show {more} more
         </button>
-      </div>
-
-      {intent.name_words.length > 0 && (
-        <p className="ask__note">
-          Also looking for names containing: {intent.name_words.join(", ")}
-        </p>
-      )}
-      {!answer.area_found && intent.area && (
-        <p className="ask__note">
-          Couldn't find “{intent.area}” on the map, so searched{" "}
-          {answer.area_label} instead.
-        </p>
-      )}
-      {answer.dropped_features.length > 0 && (
-        <p className="ask__note">
-          Nothing here is recorded with{" "}
-          {answer.dropped_features.map((f) => FEATURE_LABELS[f]).join(" + ")},
-          so these are shown without it. OpenStreetMap only records that for
-          some places — check the Photos.
-        </p>
-      )}
-
-      {answer.results.length === 0 ? (
-        <p className="empty__hint">
-          No places match that {answer.area_label}. Try asking for less, or a
-          different area.
-        </p>
-      ) : (
-        <>
-          <p className="muted">
-            {visible.length < answer.total
-              ? `Showing ${visible.length} of ${answer.total} matches`
-              : `${answer.total} match${answer.total === 1 ? "" : "es"}`}
-            , closest first.
-          </p>
-          <ul className="places">
-            {visible.map((result) => (
-              <AskResult
-                key={result.source_ref}
-                result={result}
-                destinationId={destinationId}
-                destinationName={destinationName}
-                saved={savedRefs.has(result.source_ref)}
-                expanded={expandedRef === result.source_ref}
-                onToggle={() =>
-                  setExpandedRef((current) =>
-                    current === result.source_ref ? null : result.source_ref,
-                  )
-                }
-                onSaved={onSaved}
-                onShowOnMap={onShowOnMap}
-              />
-            ))}
-          </ul>
-          {/* Only as far as the results already fetched — no new request.
-              The server sends the 25 closest; past that, a narrower question
-              beats a longer list. */}
-          {more > 0 && (
-            <button
-              type="button"
-              className="button button--secondary ask__more"
-              onClick={onShowMore}
-            >
-              Show {more} more
-            </button>
-          )}
-        </>
       )}
     </div>
   );

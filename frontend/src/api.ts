@@ -22,6 +22,7 @@ import type {
   NewDestination,
   NewPlace,
   Place,
+  SearchIntent,
   Trip,
 } from "./types";
 
@@ -195,11 +196,13 @@ export function askPina(
   destinationId: number,
   question: string,
   viewport: Bounds | null,
+  /** The search from the previous message, so a follow-up refines it. */
+  previous: SearchIntent | null = null,
 ): Promise<AskResponse> {
   return request<AskResponse>(`/destinations/${destinationId}/ask`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ question, viewport }),
+    body: JSON.stringify({ question, viewport, previous }),
   });
 }
 

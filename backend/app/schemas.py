@@ -417,16 +417,23 @@ class SearchIntent(BaseModel):
     makes a misunderstanding visible instead of silent.
     """
 
+    # The length limits matter because a client sends this back as
+    # AskRequest.previous, and it goes into the prompt: without them, one
+    # request could stuff the model's context with a megabyte of "cuisines".
     category: Category | None = None
     #: OSM cuisine values that exist in this destination ("italian").
-    cuisines: list[str] = []
-    features: list[Feature] = []
+    cuisines: list[Annotated[str, StringConstraints(max_length=40)]] = Field(
+        default=[], max_length=20
+    )
+    features: list[Feature] = Field(default=[], max_length=len(Feature))
     #: Words to look for in names, for places with no cuisine tag
     #: ("trattoria", "pizzeria"). About two thirds of restaurants have none.
-    name_words: list[str] = []
+    name_words: list[Annotated[str, StringConstraints(max_length=40)]] = Field(
+        default=[], max_length=10
+    )
     #: A neighbourhood or landmark inside the destination, or None for "the
     #: whole city" / "the current map view".
-    area: str | None = None
+    area: Annotated[str, StringConstraints(max_length=120)] | None = None
 
 
 class AskRequest(BaseModel):
@@ -436,9 +443,17 @@ class AskRequest(BaseModel):
     #: The map's current view, when the map is open. Used when the question
     #: names no area. Omitted from the Places view.
     viewport: BoundingBox | None = None
+    #: The search from the previous message in the conversation, so a
+    #: follow-up ("only vegan ones") refines it instead of starting over.
+    previous: SearchIntent | None = None
 
 
 class AskResponse(BaseModel):
+    #: Pina's answer in words: "7 Italian restaurants with outdoor seating
+    #: near Alfama." Written from the results by app/ask.py:describe, not by
+    #: the model — so it is instant and cannot claim anything the data does
+    #: not show.
+    reply: str = ""
     interpretation: SearchIntent
     #: Where was searched, in words: "near Alfama", "in the map view".
     area_label: str

@@ -31,9 +31,17 @@ class FakeLlm:
         self.intent = SearchIntent()
         self.error: Exception | None = None
         self.calls: list[tuple[str, str, list[str]]] = []
+        self.previous: list[SearchIntent | None] = []
 
-    def parse(self, question: str, city: str, cuisines: list[str]) -> SearchIntent:
+    def parse(
+        self,
+        question: str,
+        city: str,
+        cuisines: list[str],
+        previous: SearchIntent | None = None,
+    ) -> SearchIntent:
         self.calls.append((question, city, cuisines))
+        self.previous.append(previous)
         if self.error is not None:
             raise self.error
         return self.intent
@@ -552,3 +560,117 @@ def test_nearby_and_saved_places_carry_details(
     }
     assert listed["Da Mario"]["opening_hours"] == "Mo-Su 12:00-23:00"
     assert listed["My Aunt's"] is None
+
+
+# --- conversation ------------------------------------------------------------
+
+
+def test_a_follow_up_sends_the_previous_search_to_the_model(
+    client: TestClient, venice: Destination, fake_llm: FakeLlm,
+    fake_geocoder: object,
+) -> None:
+    previous = {"category": "restaurant", "cuisines": ["italian"],
+                "features": [], "name_words": [], "area": None}
+
+    ask(client, venice, question="only vegan ones", previous=previous)
+    ask(client, venice, question="something new")
+
+    assert fake_llm.previous[0] == SearchIntent.model_validate(previous)
+    # No previous means a fresh search, not "refine nothing".
+    assert fake_llm.previous[1] is None
+
+
+def test_an_oversized_previous_search_is_refused(
+    client: TestClient, venice: Destination, fake_llm: FakeLlm,
+) -> None:
+    """`previous` goes into the prompt, so its size is capped."""
+    response = client.post(
+        f"/api/destinations/{venice.id}/ask",
+        json={"question": "x", "previous": {"cuisines": ["italian"] * 500}},
+    )
+    assert response.status_code == 422
+    assert fake_llm.calls == []
+
+
+def test_the_prompt_includes_the_previous_search(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sent: dict = {}
+
+    def fake_post(url: str, json: dict, timeout: float) -> _FakeResponse:
+        sent.update(json)
+        return _FakeResponse(200, {"message": {"content": "{}"}})
+
+    monkeypatch.setattr(llm_module.httpx, "post", fake_post)
+
+    OllamaClient().parse(
+        "only vegan ones", "Lisbon", ["italian"],
+        previous=SearchIntent(cuisines=["italian"], area="Alfama"),
+    )
+
+    system = sent["messages"][0]["content"]
+    assert '"area":"Alfama"' in system
+    assert "keep every field it does not change" in system
+
+
+def test_pina_replies_in_words(
+    client: TestClient, db_session: Session, venice: Destination,
+    fake_llm: FakeLlm, fake_geocoder: object,
+) -> None:
+    place(db_session, "node/1", "Da Mario", tags={
+        "cuisine": ["italian"], "outdoor_seating": "yes"})
+    place(db_session, "node/2", "Da Luigi", tags={
+        "cuisine": ["italian"], "outdoor_seating": "yes"})
+    fake_llm.intent = SearchIntent(
+        category=Category.RESTAURANT, cuisines=["italian"],
+        features=[Feature.OUTDOOR_SEATING],
+    )
+
+    reply = ask(client, venice)["reply"]
+
+    assert reply == "2 Italian restaurants with outdoor seating in Venice."
+
+
+def test_the_reply_is_honest_about_what_was_dropped_or_missing(
+    client: TestClient, db_session: Session, venice: Destination,
+    fake_llm: FakeLlm, fake_geocoder: object,
+) -> None:
+    place(db_session, "node/1", "Fish", tags={"cuisine": ["seafood"]})
+    fake_llm.intent = SearchIntent(
+        cuisines=["seafood"], features=[Feature.OUTDOOR_SEATING], area="Atlantis"
+    )
+
+    reply = ask(client, venice)["reply"]
+
+    assert reply == (
+        "I couldn't find “Atlantis” on the map, so I searched Venice instead. "
+        "1 seafood place in Venice. None of them are recorded with outdoor "
+        "seating — OpenStreetMap only notes that for some places, so check "
+        "the Photos."
+    )
+
+
+def test_the_reply_when_nothing_matches(
+    client: TestClient, venice: Destination, fake_llm: FakeLlm,
+    fake_geocoder: object,
+) -> None:
+    fake_llm.intent = SearchIntent(category=Category.CAFE, cuisines=["sushi"])
+
+    reply = ask(client, venice)["reply"]
+
+    assert reply == (
+        "I couldn't find any sushi cafés in Venice. "
+        "Try asking for less, or somewhere else."
+    )
+
+
+@pytest.mark.parametrize(
+    ("cuisine", "word"),
+    [("italian", "Italian"), ("japanese", "Japanese"), ("french", "French"),
+     ("middle_eastern", "Middle eastern"), ("thai", "Thai"),
+     ("seafood", "seafood"), ("fish", "fish"), ("coffee_shop", "coffee shop")],
+)
+def test_cuisine_words_are_capitalised_like_english(cuisine: str, word: str) -> None:
+    from app.ask import _cuisine_word
+
+    assert _cuisine_word(cuisine) == word

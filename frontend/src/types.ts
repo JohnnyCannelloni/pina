@@ -141,6 +141,8 @@ export interface SearchIntent {
 
 /** Matches AskResponse in schemas.py. */
 export interface AskResponse {
+  /** Pina's answer in words, written by the server from the results. */
+  reply: string;
   interpretation: SearchIntent;
   /** "near Alfama", "in the map view", "in Lisboa". */
   area_label: string;

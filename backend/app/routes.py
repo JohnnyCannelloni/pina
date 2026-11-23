@@ -424,7 +424,10 @@ def ask_pina(
 
     try:
         intent = llm.parse(
-            payload.question, destination.name, ask.cuisines_in(db, destination_box)
+            payload.question,
+            destination.name,
+            ask.cuisines_in(db, destination_box),
+            previous=payload.previous,
         )
     except LlmUnavailable as exc:
         raise HTTPException(
@@ -450,6 +453,7 @@ def ask_pina(
             dropped = list(intent.features)
 
     return AskResponse(
+        reply=ask.describe(intent, area, total, dropped),
         interpretation=intent,
         area_label=area.label,
         area_found=area.found,

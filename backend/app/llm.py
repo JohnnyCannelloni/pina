@@ -67,7 +67,11 @@ class Llm(Protocol):
     """What app/ask.py needs from a model. Tests supply a fake."""
 
     def parse(
-        self, question: str, city: str, cuisines: list[str]
+        self,
+        question: str,
+        city: str,
+        cuisines: list[str],
+        previous: SearchIntent | None = None,
     ) -> SearchIntent: ...
 
 
@@ -94,6 +98,21 @@ written ("Alfama", "near the Colosseum" -> "Colosseum"). null if the request \
 names no area, or only names {city} itself.
 
 Never invent places. You only describe the search."""
+
+#: Added when the message follows an earlier one. Small models need the
+#: examples: without "keep everything else", "only vegan ones" tends to come
+#: back as a search for vegan anything, anywhere.
+FOLLOW_UP_PROMPT = """
+
+This message follows an earlier one. The current search is:
+{previous}
+
+If the message refines the current search, return the complete updated search and keep every field it does not change:
+- "only vegan ones" -> add the vegan feature, keep the rest
+- "what about Baixa?" -> change only the area
+- "cafés instead" -> change only the category
+- "without the terrace" -> remove that feature
+If it asks for something unrelated, start a new search."""
 
 
 def _schema(cuisines: list[str]) -> dict[str, object]:
@@ -174,7 +193,23 @@ def clean_intent(raw: SearchIntent, city: str, cuisines: list[str]) -> SearchInt
 class OllamaClient:
     """Talks to a local Ollama server. One HTTP call per question."""
 
-    def parse(self, question: str, city: str, cuisines: list[str]) -> SearchIntent:
+    def parse(
+        self,
+        question: str,
+        city: str,
+        cuisines: list[str],
+        previous: SearchIntent | None = None,
+    ) -> SearchIntent:
+        system = (
+            SYSTEM_PROMPT.format(city=city)
+            + "\n\nAllowed cuisines: "
+            + (", ".join(cuisines) if cuisines else "(none)")
+        )
+        if previous is not None:
+            system += FOLLOW_UP_PROMPT.format(
+                previous=previous.model_dump_json()
+            )
+
         body = {
             "model": settings.OLLAMA_MODEL,
             "stream": False,
@@ -186,12 +221,7 @@ class OllamaClient:
             "options": {"temperature": 0},
             "format": _schema(cuisines),
             "messages": [
-                {
-                    "role": "system",
-                    "content": SYSTEM_PROMPT.format(city=city)
-                    + "\n\nAllowed cuisines: "
-                    + (", ".join(cuisines) if cuisines else "(none)"),
-                },
+                {"role": "system", "content": system},
                 {"role": "user", "content": question},
             ],
         }

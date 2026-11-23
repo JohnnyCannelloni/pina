@@ -23,6 +23,7 @@ search() for the measured reason.
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
 from collections.abc import Iterable, Mapping
 
@@ -375,3 +376,109 @@ def search(
         select(OsmPlace).where(where).order_by(*ordering).limit(limit)
     ).all()
     return total, to_suggestions(db, destination_id, places)
+
+
+# --- the reply -----------------------------------------------------------------
+
+#: How each feature reads after "with": "Italian restaurants with outdoor
+#: seating and vegan options".
+FEATURE_PHRASES: dict[Feature, str] = {
+    Feature.OUTDOOR_SEATING: "outdoor seating",
+    Feature.VEGETARIAN: "vegetarian options",
+    Feature.VEGAN: "vegan options",
+    Feature.GLUTEN_FREE: "gluten-free options",
+    Feature.WHEELCHAIR: "wheelchair access",
+    Feature.TAKEAWAY: "takeaway",
+    Feature.DELIVERY: "delivery",
+}
+
+CATEGORY_NOUNS: dict[Category | None, tuple[str, str]] = {
+    Category.RESTAURANT: ("restaurant", "restaurants"),
+    Category.CAFE: ("café", "cafés"),
+    Category.SIGHT: ("sight", "sights"),
+    None: ("place", "places"),
+}
+
+
+def _and(items: list[str]) -> str:
+    """["a"] -> "a", ["a", "b"] -> "a and b", ["a", "b", "c"] -> "a, b and c"."""
+    if len(items) <= 1:
+        return "".join(items)
+    return f"{', '.join(items[:-1])} and {items[-1]}"
+
+
+#: Cuisines named after a people or place, which English capitalises:
+#: "Italian", "Japanese", "Spanish", "French", "Middle eastern", "Thai".
+_PROPER_CUISINE = re.compile(r"(an|ese|ish|ch|ern)$")
+_PROPER_CUISINE_EXTRA = frozenset(
+    {"thai", "greek", "israeli", "nepali", "pakistani", "basque", "swiss",
+     "bangladeshi", "iraqi", "kurdish", "tex-mex"}
+)
+
+
+def _cuisine_word(cuisine: str) -> str:
+    """ "italian" -> "Italian", "middle_eastern" -> "Middle eastern",
+    "seafood" -> "seafood". "fish" ends in -ish but is not a nationality."""
+    words = cuisine.replace("_", " ")
+    if cuisine != "fish" and (
+        _PROPER_CUISINE.search(cuisine) or cuisine in _PROPER_CUISINE_EXTRA
+    ):
+        return words[:1].upper() + words[1:]
+    return words
+
+
+def _thing(intent: SearchIntent, count: int, features: list[Feature]) -> str:
+    """ "Italian restaurants with outdoor seating", "a vegan-options café"... """
+    singular, plural = CATEGORY_NOUNS[intent.category]
+    noun = singular if count == 1 else plural
+    cuisines = [_cuisine_word(c) for c in intent.cuisines]
+    if cuisines:
+        noun = f"{_and(cuisines)} {noun}"
+    if features:
+        noun += " with " + _and([FEATURE_PHRASES[f] for f in features])
+    return noun
+
+
+def describe(
+    intent: SearchIntent,
+    area: SearchArea,
+    total: int,
+    dropped: list[Feature],
+) -> str:
+    """Pina's reply, written from the results rather than by the model.
+
+    A template, deliberately. It is instant and free, and it can only say what
+    the search actually found — a small local model writing prose is exactly
+    where invented details creep in. When Pina moves to a hosted model, this
+    is the function the model's own reply would replace.
+    """
+    sentences: list[str] = []
+
+    if not area.found and intent.area:
+        sentences.append(
+            f"I couldn't find “{intent.area}” on the map, so I searched "
+            f"{area.label.removeprefix('in ')} instead."
+        )
+
+    # When features were dropped, the results are described without them...
+    kept = [f for f in intent.features if f not in dropped]
+
+    if total == 0:
+        sentences.append(
+            f"I couldn't find any {_thing(intent, 2, kept)} {area.label}. "
+            "Try asking for less, or somewhere else."
+        )
+        return " ".join(sentences)
+
+    count = f"{total:,}"
+    sentences.append(f"{count} {_thing(intent, total, kept)} {area.label}.")
+
+    # ...and the reply says so, rather than letting the user assume they match.
+    if dropped:
+        missing = _and([FEATURE_PHRASES[f] for f in dropped])
+        sentences.append(
+            f"None of them are recorded with {missing} — OpenStreetMap only "
+            "notes that for some places, so check the Photos."
+        )
+
+    return " ".join(sentences)
