@@ -1,20 +1,8 @@
 /**
- * The save form. READ THIS THIRD — `handleSubmit` is where a save begins.
+ * the save form. the pin is just two more fields in the same request.
  *
- * The whole trace, end to end:
- *
- *   handleSubmit (below)
- *     -> createPlace()                      api.ts
- *     -> POST /api/destinations/1/places    proxied by Vite to port 8000
- *     -> create_place()                     backend/app/routes.py
- *     -> PlaceCreate validates              backend/app/schemas.py
- *     -> Place(...) + db.commit()            backend/app/models.py, db.py
- *     -> INSERT INTO places ...              the table from 0001_initial.py
- *     -> PlaceRead serialises the saved row
- *     -> onSaved(place) hands it to DestinationPage, which prepends it to state
- *
- * The pin is not special in any of that. It is two more fields in the same form
- * state, in the same request body, written by the same INSERT.
+ *   handleSubmit -> createPlace() (api.ts) -> POST /api/destinations/{id}/places
+ *   -> onSaved(place), which DestinationPage prepends to its state
  */
 
 import { useState } from "react";
@@ -30,42 +18,36 @@ import {
 
 interface AddPlaceFormProps {
   destination: Destination;
-  /** Called with the saved place, so the parent can add it to its list. */
+  /** called with the saved place, so the parent can add it. */
   onSaved: (place: Place) => void;
 }
 
 const CATEGORIES: Category[] = ["restaurant", "cafe", "sight"];
 
 export function AddPlaceForm({ destination, onSaved }: AddPlaceFormProps) {
-  // One piece of state per field. No form library — with four fields it would
-  // be more to learn than to write.
+  // one piece of state per field; four fields don't need a form library.
   const [name, setName] = useState("");
   const [category, setCategory] = useState<Category>("restaurant");
   const [mustGo, setMustGo] = useState(false);
-  // null means "no pin", which is a valid place. Not undefined, and not
-  // {lat: 0, lng: 0} — a real coordinate off the coast of Africa is exactly the
-  // kind of placeholder that ends up in the database.
+  // null means no pin (not {0, 0}, which is a real coordinate).
   const [pin, setPin] = useState<Coordinates | null>(null);
 
   const [showPicker, setShowPicker] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Mirrors the backend's rule (a name is required after trimming) so the
-  // button is disabled rather than producing a 422 the user has to read.
+  // matches the backend rule, so the button is disabled instead of a 422.
   const canSave = name.trim().length > 0 && !saving;
 
   async function handleSubmit(event: React.FormEvent) {
-    // Without this the browser does a full page navigation on submit — the form
-    // appears to clear itself and the save never happens.
+    // stop the browser's own form submit.
     event.preventDefault();
 
     if (!canSave) {
       return;
     }
 
-    // Clear any previous failure, and lock the button so a double-click or an
-    // Enter keypress cannot save the same place twice.
+    // lock the button so a double click can't save twice.
     setError(null);
     setSaving(true);
 
@@ -74,34 +56,26 @@ export function AddPlaceForm({ destination, onSaved }: AddPlaceFormProps) {
         name: name.trim(),
         category,
         must_go: mustGo,
-        // Both or neither — the same invariant the database enforces with
-        // ck_places_coords_both_or_neither. Spreading from one nullable object
-        // makes it impossible to send half a pin from here.
+        // both coordinates or neither.
         latitude: pin?.latitude ?? null,
         longitude: pin?.longitude ?? null,
       });
 
-      // Only reached if api.ts did not throw, i.e. the row is committed. The
-      // response is the saved record with its real database id, so state can be
-      // updated without refetching.
+      // the response is the saved row with its real id.
       onSaved(saved);
 
-      // Reset only on success. On failure the fields keep their values (see
-      // below), so a retry does not mean retyping.
+      // reset only on success, so a failed save keeps what was typed.
       setName("");
       setCategory("restaurant");
       setMustGo(false);
       setPin(null);
       setShowPicker(false);
     } catch (caught) {
-      // api.ts throws on any non-2xx *and* on an unreachable server, so this
-      // one branch covers a validation error, a 404, a 500, and uvicorn being
-      // stopped. Nothing above ran, so nothing was saved — and crucially the
-      // form state is untouched, so the user's typing and their pin survive.
+      // covers validation errors, 404/500 and an unreachable server. the form
+      // state is untouched, so the user's input survives.
       setError(caught instanceof Error ? caught.message : "Could not save.");
     } finally {
-      // finally, not at the end of try: on the error path the button must be
-      // re-enabled too, or a failed save locks the form forever.
+      // in finally, so a failed save doesn't lock the form.
       setSaving(false);
     }
   }
@@ -149,8 +123,7 @@ export function AddPlaceForm({ destination, onSaved }: AddPlaceFormProps) {
         <span>Must-go</span>
       </label>
 
-      {/* Collapsed by default: a pin is optional, and an always-open map would
-          push the Save button off a phone screen. */}
+      {/* collapsed by default so the save button stays on screen on a phone. */}
       <div className="picker__wrap">
         <button
           type="button"
@@ -176,8 +149,7 @@ export function AddPlaceForm({ destination, onSaved }: AddPlaceFormProps) {
                 </span>
               ) : (
                 <>
-                  {/* Rounded for display only — the full precision value stays
-                      in state and is what gets sent and stored. */}
+                  {/* rounded for display only; full precision is sent. */}
                   <span className="picker__coords">
                     {pin.latitude.toFixed(5)}, {pin.longitude.toFixed(5)}
                   </span>
@@ -195,8 +167,7 @@ export function AddPlaceForm({ destination, onSaved }: AddPlaceFormProps) {
         )}
       </div>
 
-      {/* role="alert" makes a screen reader announce the failure immediately,
-          rather than leaving it as text the user has to go looking for. */}
+      {/* role="alert" so screen readers announce it. */}
       {error !== null && (
         <p className="error" role="alert">
           <strong>Could not save.</strong> {error}

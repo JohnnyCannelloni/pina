@@ -1,13 +1,7 @@
 /**
- * The trip: its destinations, a switcher between them, and the add form.
- *
- * This sits above DestinationPage and owns "which destination am I looking
- * at?". It exists because destinations are now things you create rather than a
- * single seeded row — Venice is just the first one.
- *
- * It also owns the *selected* destination's detail (bounds and sync progress),
- * because two children need it: SyncStatus renders it, and DestinationPage
- * passes its bounds to the map.
+ * a trip: its destinations, a switcher, and the add form. owns which
+ * destination is selected, and that destination's detail (bounds and sync
+ * state), which both SyncStatus and DestinationPage need.
  */
 
 import { useCallback, useEffect, useState } from "react";
@@ -23,15 +17,13 @@ interface TripPageProps {
 }
 
 export function TripPage({ trip }: TripPageProps) {
-  // The destination list, kept locally so adding one does not need a trip
-  // refetch. Seeded from the trip the App already loaded.
+  // kept locally so adding a destination doesn't refetch the trip.
   const [destinations, setDestinations] = useState(trip.destinations);
   const [selectedId, setSelectedId] = useState<number | null>(
     trip.destinations[0]?.id ?? null,
   );
 
-  // Full detail for the selected destination. The trip list only carries the
-  // summary, and the map needs bounds plus sync state.
+  // full detail for the selected destination; the trip list only has a summary.
   const [detail, setDetail] = useState<DestinationDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -42,8 +34,7 @@ export function TripPage({ trip }: TripPageProps) {
     }
 
     let active = true;
-    // Clear immediately, so switching destinations cannot briefly show the
-    // previous city's map bounds and sync banner.
+    // clear first, so the previous city's map and banner don't flash.
     setDetail(null);
     setError(null);
 
@@ -68,11 +59,10 @@ export function TripPage({ trip }: TripPageProps) {
     };
   }, [selectedId]);
 
-  // useCallback because SyncStatus takes this in a useEffect dependency list;
-  // a fresh function each render would restart its polling interval every tick.
+  // stable, since SyncStatus uses it as an effect dependency.
   const handleDetailUpdate = useCallback((fresh: DestinationDetail) => {
     setDetail(fresh);
-    // Keep the switcher's copy in step, so its label reflects sync state too.
+    // keep the switcher's copy in step.
     setDestinations((current) =>
       current.map((destination) =>
         destination.id === fresh.id ? { ...destination, ...fresh } : destination,
@@ -82,20 +72,12 @@ export function TripPage({ trip }: TripPageProps) {
 
   function handleCreated(created: DestinationDetail) {
     setDestinations((current) => [...current, created]);
-    // Jump straight to the new city — adding it is a statement of intent to
-    // look at it.
+    // jump to the new city.
     setSelectedId(created.id);
     setDetail(created);
   }
 
-  /**
-   * Called by DestinationPage once the user has confirmed.
-   *
-   * Lives here, not in DestinationPage, because this component owns the
-   * destination list and the selection — both change when one is deleted.
-   * State is updated only after the API succeeds, so a failed delete cannot
-   * hide a destination that still exists.
-   */
+  /** delete after the user confirmed. state changes only once the api succeeds. */
   async function handleDeleteDestination(destinationId: number) {
     try {
       await deleteDestination(destinationId);
@@ -110,8 +92,7 @@ export function TripPage({ trip }: TripPageProps) {
 
     const remaining = destinations.filter((d) => d.id !== destinationId);
     setDestinations(remaining);
-    // Show the next destination, or the "No destinations yet" state when that
-    // was the last one. Changing selectedId re-runs the detail effect above.
+    // show the next destination, or the empty state.
     setSelectedId(remaining[0]?.id ?? null);
   }
 

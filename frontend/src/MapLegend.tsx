@@ -1,15 +1,7 @@
 /**
- * A key for the three marker styles.
+ * a key for the three marker styles: saved, must-go and suggested.
  *
- * There are now three kinds of marker on the map — saved, saved-and-must-go,
- * and suggested — and nothing on screen explained the difference. A legend is
- * the cheapest possible fix; the alternative is the user working it out by
- * clicking, which is exactly the "not very informative" problem.
- *
- * The swatches are inline SVG rather than reusing leafletIcons.ts, because
- * those are Leaflet DivIcon objects built for a map pane, not React nodes.
- * Keeping the two in step by hand is the small cost of not dragging Leaflet
- * into a static legend.
+ * inline svg rather than the leaflet icons, so keep the two in step by hand.
  */
 
 export function MapLegend() {

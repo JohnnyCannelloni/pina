@@ -1,11 +1,6 @@
 /**
- * What OpenStreetMap knows about a place, plus the Photos link.
- *
- * Used in both map popups and in the Ask Pina results, so a place reads the
- * same wherever you meet it. Everything is optional: OSM records a cuisine for
- * about a third of restaurants and opening hours for a fifth, so a line is
- * drawn only when there is something to put on it. A place with no details at
- * all still gets the Photos link, which is always available.
+ * what osm knows about a place, plus the photos link. used in both map popups
+ * and in ask pina results. each line is drawn only if the data exists.
  */
 
 import { PhotosLink } from "./PhotosLink";
@@ -13,13 +8,12 @@ import { FEATURE_LABELS, formatCuisine, type PlaceDetails } from "./types";
 
 interface PlaceInfoProps {
   name: string;
-  /** The destination's name, for the Photos search. */
+  /** the destination's name, for the photos search. */
   near: string;
   latitude: number | null;
   longitude: number | null;
   details: PlaceDetails | null;
-  /** Skip cuisine and features, when the caller already shows them (an Ask
-   *  result's summary line). */
+  /** skip cuisine and features when the caller already shows them. */
   withoutSummary?: boolean;
 }
 
@@ -50,8 +44,7 @@ export function PlaceInfo({
       )}
 
       {details?.opening_hours && (
-        // OSM's own syntax ("Mo-Fr 12:00-15:00; Sa 19:00-23:00"), shown as
-        // written. Parsing it into "open now" is a project of its own.
+        // osm's own syntax, shown as written.
         <span className="info__line info__muted">🕒 {details.opening_hours}</span>
       )}
 
@@ -67,8 +60,7 @@ export function PlaceInfo({
           longitude={longitude}
         />
         {details?.website && (
-          // The backend only lets http(s) links through (extract.py
-          // _clean_website), so this href cannot be a javascript: URL.
+          // the backend only stores http(s) links (extract.py _clean_website).
           <a
             href={details.website}
             target="_blank"

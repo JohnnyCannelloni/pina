@@ -1,12 +1,8 @@
 /**
- * The destination page: the form, the Places/Map toggle, and whichever view is
- * selected.
+ * a destination page: ask pina, the save form, and the places/map toggle.
  *
- * This component owns the `places` array, and that is the important structural
- * decision. Both views are handed the *same* array, so they cannot disagree,
- * and switching tabs refetches nothing. Had each view fetched its own copy, the
- * list and the map could show different data after a save — the classic bug
- * this shape avoids.
+ * owns the `places` array that both views read, so they can't disagree and
+ * switching tabs refetches nothing.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -25,10 +21,9 @@ import type {
 } from "./types";
 
 interface DestinationPageProps {
-  /** The full detail, not the summary: the map needs the stored bounds and the
-   *  Map view needs sync_state to word its empty message correctly. */
+  /** full detail: the map needs the bounds and sync state. */
   destination: DestinationDetail;
-  /** Deletes this destination. Called only after the user has confirmed. */
+  /** delete this destination. only called after the user confirms. */
   onDelete: (destinationId: number) => void;
 }
 
@@ -43,29 +38,25 @@ export function DestinationPage({
   const [loadError, setLoadError] = useState<string | null>(null);
   const [view, setView] = useState<View>("places");
 
-  // Which place the map should fly to. Lives here, not in MapView, because it
-  // is set by the *list* and consumed by the *map* — the nearest common parent
-  // is the only place both can reach.
+  // which place the map should fly to. set by the list, used by the map.
   const [focusedPlaceId, setFocusedPlaceId] = useState<number | null>(null);
 
-  // Ask Pina's answer lives here, not in AskPina, because the map draws it
-  // too. `focusedRef` is the result "Show on map" should fly to.
+  // ask pina's latest answer lives here because the map draws it too.
+  // `focusedRef` is the result "show on map" should fly to.
   const [askAnswer, setAskAnswer] = useState<AskResponse | null>(null);
   const [focusedRef, setFocusedRef] = useState<string | null>(null);
-  // How many results are showing. Here, not in AskPina, because the map draws
-  // the same slice — the list and the pins must always agree.
+  // how many results are shown. the map draws the same slice.
   const [askShown, setAskShown] = useState(ASK_PAGE_SIZE);
 
-  // The map's visible area, for questions that name no area. A ref, not
-  // state: it changes on every pan and nothing needs to re-render for it.
+  // the map's visible area, for questions that name no area. a ref, since it
+  // changes on every pan and nothing needs to re-render.
   const viewport = useRef<Bounds | null>(null);
   const handleViewportChange = useCallback((bounds: Bounds) => {
     viewport.current = bounds;
   }, []);
 
-  // "Show on map" has to *take you* to the map, not just switch the tab: the
-  // map sits below the Ask results, often off-screen. A counter rather than a
-  // boolean, so asking twice in a row scrolls twice.
+  // "show on map" also scrolls to the map, which is often below the chat. a
+  // counter so asking twice scrolls twice.
   const viewCard = useRef<HTMLDivElement>(null);
   const [scrollRequest, setScrollRequest] = useState(0);
   useEffect(() => {
@@ -81,22 +72,19 @@ export function DestinationPage({
     });
   }, [scrollRequest]);
 
-  /** Switch to the map and bring it on screen. */
+  /** switch to the map and scroll it into view. */
   function goToMap() {
     setView("map");
     setScrollRequest((count) => count + 1);
   }
 
-  // A different destination starts with no answer — Lisbon's results have no
-  // business on New York's map.
+  // a different destination starts with no answer.
   useEffect(() => {
     setAskAnswer(null);
     setFocusedRef(null);
   }, [destination.id]);
 
-  // This effect is why a refresh keeps your places: on mount, state starts
-  // empty and is filled from the database. Nothing is cached in the browser —
-  // what you see after F5 is what Postgres holds.
+  // load from the database on mount; nothing is cached in the browser.
   useEffect(() => {
     let active = true;
 
@@ -105,9 +93,7 @@ export function DestinationPage({
       setLoadError(null);
       try {
         const loaded = await fetchPlaces(destination.id);
-        // The guard: if the component unmounted (or destination changed) while
-        // this request was in flight, dropping the result avoids setting state
-        // on a dead component and avoids a slow response overwriting a fast one.
+        // ignore the result if the destination changed or we unmounted.
         if (active) {
           setPlaces(loaded);
         }
@@ -130,26 +116,12 @@ export function DestinationPage({
     };
   }, [destination.id]);
 
-  /**
-   * Called by AddPlaceForm with the row the API just returned.
-   *
-   * Prepending the real saved record — rather than optimistically inserting a
-   * guess and reconciling later — means the id, created_at, and coordinates in
-   * state are exactly what is in the database. The map can therefore key off
-   * `place.id` and trust the position.
-   */
+  /** add the saved row returned by the api. */
   function handleSaved(place: Place) {
     setPlaces((current) => [place, ...current]);
   }
 
-  /**
-   * Called by PlaceList once the user has confirmed a delete.
-   *
-   * Removed from state only after the API succeeds, so a failed delete cannot
-   * make a place vanish from the screen while it is still in the database.
-   * Both views read this one array, so the list row and the map pin go
-   * together.
-   */
+  /** delete a place after the user confirmed. state changes only once the api succeeds. */
   async function handleDeletePlace(placeId: number) {
     try {
       await deletePlace(destination.id, placeId);
@@ -164,13 +136,7 @@ export function DestinationPage({
     }
   }
 
-  /**
-   * Called by PlaceList when a pinned place is clicked.
-   *
-   * Switching view and setting the target are one action, so they are one
-   * function. React batches both updates into a single render, so the map
-   * mounts already knowing where to fly.
-   */
+  /** switch to the map and fly to this place, in one render. */
   function handleFocusPlace(placeId: number) {
     setFocusedPlaceId(placeId);
     goToMap();
@@ -182,8 +148,8 @@ export function DestinationPage({
     setAskShown(ASK_PAGE_SIZE);
   }
 
-  /** "Show on map" on an Ask result. A result you have since saved is now a
-   *  saved pin, so it is focused the same way as a row in the Places list. */
+  /** "show on map" for an ask result. a result saved since then is a saved
+   *  pin now, so it's focused like a row in the places list. */
   function handleShowResult(result: Suggestion) {
     const saved = places.find((place) => place.source_ref === result.source_ref);
     if (saved) {
@@ -202,8 +168,7 @@ export function DestinationPage({
           type="button"
           className="linkbutton destination__delete"
           onClick={() => {
-            // The confirm is here because this component knows how many
-            // places would go with it — the number worth warning about.
+            // confirm here, where the number of affected places is known.
             const count = places.length;
             const also =
               count > 0
@@ -225,8 +190,7 @@ export function DestinationPage({
         onAnswer={handleAnswer}
         shown={askShown}
         onShowMore={() => setAskShown((count) => count + ASK_PAGE_SIZE)}
-        // Only while the map is open: from the Places tab, "around here" has
-        // no meaning, so the whole destination is searched.
+        // only while the map is open; otherwise the whole destination is searched.
         getViewport={() => (view === "map" ? viewport.current : null)}
         onSaved={handleSaved}
         onShowOnMap={handleShowResult}
@@ -235,8 +199,7 @@ export function DestinationPage({
       <AddPlaceForm destination={destination} onSaved={handleSaved} />
 
       <div className="card" ref={viewCard}>
-        {/* role="tablist" + aria-selected tells a screen reader this is a view
-            switcher, not two unrelated buttons. */}
+        {/* tablist + aria-selected: announced as a view switcher. */}
         <div className="toggle" role="tablist" aria-label="View">
           <button
             type="button"
@@ -267,9 +230,7 @@ export function DestinationPage({
           </p>
         )}
 
-        {/* A failed *load* is reported separately from a failed *save*: this one
-            is not the user's fault and has no form state to preserve, so it
-            offers a reload instead. */}
+        {/* a failed load offers a reload; there's no form state to keep. */}
         {!loading && loadError !== null && (
           <p className="error" role="alert">
             <strong>Could not load places.</strong> {loadError}
@@ -297,9 +258,7 @@ export function DestinationPage({
               places={places}
               destination={destination}
               onShowList={() => setView("places")}
-              // Suggestions saved from a map popup go into the same state as
-              // a manual save, which is what makes the saved marker replace
-              // the suggestion with no extra wiring.
+              // map saves go into the same state as manual ones.
               onSaved={handleSaved}
               focusedPlaceId={focusedPlaceId}
               askResults={askAnswer?.results.slice(0, askShown) ?? []}

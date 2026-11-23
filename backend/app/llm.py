@@ -1,26 +1,9 @@
-"""The local LLM: turning a question into a search, through Ollama.
+"""the llm side of ask pina: turn a question into a SearchIntent via ollama.
 
-READ THIS FIRST for Ask Pina, then app/ask.py.
-
-**The one rule: the LLM never names a place.** A small local model asked to
-"recommend Italian restaurants in Lisbon" invents names and addresses with
-total confidence. So it is given a narrower job that small models do well:
-read a sentence and fill in a form. The form is `SearchIntent`; app/ask.py
-then runs it against osm_places, so every result is a real, mapped place.
-
-**Structured outputs, not tool calling.** Ollama's `format` field takes a JSON
-schema and *constrains decoding* to it: the model cannot emit a token that
-would break the schema. That is stronger than asking nicely for JSON, and
-more reliable on an 8B model than tool calling. Two consequences worth seeing:
-
-  - `features` is an enum, so the model can only pick things the data can
-    answer.
-  - `cuisines` is an enum of the cuisine values that *actually exist in this
-    destination*, built per request. "a pasta place" can only become
-    "italian", never a made-up tag that matches nothing.
-
-This is the only file that knows Ollama exists. Swapping in a hosted model
-later means replacing `OllamaClient` and nothing else.
+the model never names places. it fills in a search, and app/ask.py runs it
+against osm_places. ollama's structured outputs (`format`, a json schema)
+constrain decoding, so `features` and `cuisines` can only be values the data
+can answer. this is the only file that talks to the model.
 """
 
 from __future__ import annotations
@@ -38,9 +21,8 @@ from app.schemas import Feature, SearchIntent
 
 logger = logging.getLogger(__name__)
 
-#: Words that describe *every* place of a category, so searching names for them
-#: would only throw away good matches ("cafe with wifi" must not require
-#: "cafe" in the name). Dropped from name_words whatever the model says.
+#: words that describe every place of a category; dropped from name_words so
+#: "cafe with wifi" doesn't require "cafe" in the name.
 GENERIC_NAME_WORDS = frozenset(
     {
         "restaurant", "restaurante", "ristorante", "cafe", "café", "caffè",
@@ -52,22 +34,22 @@ MAX_NAME_WORDS = 5
 
 
 class LlmError(RuntimeError):
-    """The model answered, but not with something usable."""
+    """the model answered, but not with something usable."""
 
 
 class LlmUnavailable(LlmError):
-    """Ollama is not running, or the model is not pulled.
-
-    A separate type so the route can answer 503 with the command that fixes
-    it, rather than a generic failure.
-    """
+    """ollama isn't running or the model isn't pulled. maps to a 503 with the fix."""
 
 
 class Llm(Protocol):
-    """What app/ask.py needs from a model. Tests supply a fake."""
+    """what app/ask.py needs from a model. tests use a fake."""
 
     def parse(
-        self, question: str, city: str, cuisines: list[str]
+        self,
+        question: str,
+        city: str,
+        cuisines: list[str],
+        previous: SearchIntent | None = None,
     ) -> SearchIntent: ...
 
 
@@ -95,13 +77,26 @@ names no area, or only names {city} itself.
 
 Never invent places. You only describe the search."""
 
+#: added for follow-ups. without the examples, small models tend to drop the
+#: rest of the search ("only vegan ones" -> vegan anything, anywhere).
+FOLLOW_UP_PROMPT = """
+
+This message follows an earlier one. The current search is:
+{previous}
+
+If the message refines the current search, return the complete updated search and keep every field it does not change:
+- "only vegan ones" -> add the vegan feature, keep the rest
+- "what about Baixa?" -> change only the area
+- "cafés instead" -> change only the category
+- "without the terrace" -> remove that feature
+If it asks for something unrelated, start a new search."""
+
 
 def _schema(cuisines: list[str]) -> dict[str, object]:
-    """The JSON schema Ollama must follow, with this destination's cuisines.
+    """the json schema ollama must follow, with this destination's cuisines.
 
-    Written by hand rather than SearchIntent.model_json_schema(): the cuisine
-    enum is per-request, and a flat schema with no $refs is what small models
-    follow most reliably.
+    hand-written and flat (no $refs), since the cuisine enum is per request
+    and small models follow flat schemas more reliably.
     """
     cuisine_items: dict[str, object] = (
         {"type": "string", "enum": cuisines} if cuisines else {"type": "string"}
@@ -115,7 +110,7 @@ def _schema(cuisines: list[str]) -> dict[str, object]:
             "cuisines": {
                 "type": "array",
                 "items": cuisine_items,
-                # No cuisine data here means nothing to choose from.
+                # no cuisine data means nothing to choose from.
                 **({} if cuisines else {"maxItems": 0}),
             },
             "features": {
@@ -130,19 +125,13 @@ def _schema(cuisines: list[str]) -> dict[str, object]:
 
 
 def clean_intent(raw: SearchIntent, city: str, cuisines: list[str]) -> SearchIntent:
-    """Tidy what the model said, without trusting it.
-
-    The schema already constrains the shape; this enforces the meaning. It is
-    a separate function so the rules are tested directly, without a model.
-    """
+    """enforce what the schema can't: real cuisines, useful name words, a real area."""
     allowed = set(cuisines)
     city_lower = city.strip().lower()
 
     area = (raw.area or "").strip() or None
 
-    # Words from the place names themselves ("museums in Belém" -> "belém")
-    # would match whatever happens to be named after the area — measured, a
-    # pastry shop ranked among the museums.
+    # area words in name_words match whatever is named after the area.
     place_words = set(f"{city_lower} {(area or '').lower()}".split())
 
     words: list[str] = []
@@ -156,14 +145,13 @@ def clean_intent(raw: SearchIntent, city: str, cuisines: list[str]) -> SearchInt
         ):
             words.append(cleaned)
 
-    # "pizza in Lisbon" names the city, not an area inside it. Searching for
-    # "Lisbon" inside Lisbon would just give us the city centre point.
+    # naming the city itself isn't an area within it.
     if area is not None and area.lower() in {city_lower, f"{city_lower} city"}:
         area = None
 
     return SearchIntent(
         category=raw.category,
-        # dict.fromkeys de-duplicates while keeping the model's order.
+        # dedupe, keeping order.
         cuisines=list(dict.fromkeys(c for c in raw.cuisines if c in allowed)),
         features=list(dict.fromkeys(raw.features)),
         name_words=words[:MAX_NAME_WORDS],
@@ -172,26 +160,36 @@ def clean_intent(raw: SearchIntent, city: str, cuisines: list[str]) -> SearchInt
 
 
 class OllamaClient:
-    """Talks to a local Ollama server. One HTTP call per question."""
+    """a local ollama server. one http call per question."""
 
-    def parse(self, question: str, city: str, cuisines: list[str]) -> SearchIntent:
+    def parse(
+        self,
+        question: str,
+        city: str,
+        cuisines: list[str],
+        previous: SearchIntent | None = None,
+    ) -> SearchIntent:
+        system = (
+            SYSTEM_PROMPT.format(city=city)
+            + "\n\nAllowed cuisines: "
+            + (", ".join(cuisines) if cuisines else "(none)")
+        )
+        if previous is not None:
+            system += FOLLOW_UP_PROMPT.format(
+                previous=previous.model_dump_json()
+            )
+
         body = {
             "model": settings.OLLAMA_MODEL,
             "stream": False,
-            # qwen3 "thinks" out loud before answering by default, which
-            # doubles the wait for a task this simple.
+            # skip qwen3's thinking pass; it doubles the wait for no gain here.
             "think": False,
             "keep_alive": settings.OLLAMA_KEEP_ALIVE,
-            # 0: the same question should give the same search.
+            # deterministic: the same question gives the same search.
             "options": {"temperature": 0},
             "format": _schema(cuisines),
             "messages": [
-                {
-                    "role": "system",
-                    "content": SYSTEM_PROMPT.format(city=city)
-                    + "\n\nAllowed cuisines: "
-                    + (", ".join(cuisines) if cuisines else "(none)"),
-                },
+                {"role": "system", "content": system},
                 {"role": "user", "content": question},
             ],
         }
@@ -227,7 +225,7 @@ class OllamaClient:
             content = response.json()["message"]["content"]
             raw = SearchIntent.model_validate(json.loads(content))
         except (KeyError, TypeError, ValueError, ValidationError) as exc:
-            # ValueError covers both bad JSON and a bad enum value.
+            # ValueError covers bad json and bad enum values.
             logger.warning("unusable LLM answer: %r", response.text[:500])
             raise LlmError(
                 "The assistant gave an answer Pina couldn't read. "
@@ -242,5 +240,5 @@ _client = OllamaClient()
 
 
 def get_llm() -> Llm:
-    """FastAPI dependency. The same testing seam as get_geocoder."""
+    """fastapi dependency. tests swap this for a fake."""
     return _client

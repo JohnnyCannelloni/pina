@@ -1,32 +1,16 @@
-"""The HTTP endpoints.
+"""http endpoints.
 
-    GET  /api/trips                            the trip list
-    GET  /api/geocode?q=                       find a city to add
-    POST /api/trips/{id}/destinations          add a destination, start its sync
-    GET  /api/destinations/{id}                destination + sync progress
-    DELETE /api/destinations/{id}              remove it and its saved places
-    POST /api/destinations/{id}/sync           re-run / resume the sync
-    GET  /api/destinations/{id}/places         your saved collection
-    POST /api/destinations/{id}/places         save a place
-    DELETE /api/destinations/{id}/places/{pid} remove a saved place
-    GET  /api/destinations/{id}/nearby         cached OSM places you could save
-    POST /api/destinations/{id}/ask            Ask Pina: a question -> places
-
-Note what `nearby` is now: a plain indexed SELECT against our own osm_places
-table. It used to call Overpass on every request, which is why it took seconds
-or returned a 502. Compare the two versions in git — moving a third-party
-dependency off the request path is most of what this increment is.
-
-This is the middle of the trace. Follow a save from here:
-
-    AddPlaceForm.handleSubmit (React)
-      -> POST /api/destinations/1/places
-      -> create_place (below)
-      -> PlaceCreate validates the body          (schemas.py)
-      -> Place(...) builds the row               (models.py)
-      -> db.add / db.commit issues the INSERT    (db.py holds the Session)
-      -> PlaceRead serialises the saved row back (schemas.py)
-      -> React prepends it to state
+    GET    /api/trips                            trips with their destinations
+    GET    /api/geocode?q=                       find a city to add
+    POST   /api/trips/{id}/destinations          add a destination, start its sync
+    GET    /api/destinations/{id}                destination + sync progress
+    DELETE /api/destinations/{id}                remove it and its saved places
+    POST   /api/destinations/{id}/sync           re-run / resume the sync
+    GET    /api/destinations/{id}/places         saved places
+    POST   /api/destinations/{id}/places         save a place
+    DELETE /api/destinations/{id}/places/{pid}   remove a saved place
+    GET    /api/destinations/{id}/nearby         cached osm places in a viewport
+    POST   /api/destinations/{id}/ask            ask pina: a question -> places
 """
 
 from collections.abc import Callable
@@ -74,50 +58,26 @@ from app.sync import cancel_download, clamp_area, get_sync_runner
 
 router = APIRouter(prefix="/api")
 
-# Module-level constant rather than a literal list in the signature below.
-# A mutable default argument is evaluated once at import and shared by every
-# call, so anything that mutated it would corrupt the default for the life of
-# the process. A tuple cannot be mutated, which removes the hazard entirely.
+# a tuple, so the default below can't be mutated.
 ALL_CATEGORIES = (Category.RESTAURANT, Category.CAFE, Category.SIGHT)
 
-#: Above this many places in the viewport, return clusters instead of pins.
-#: A few hundred markers is already dense on screen; a few thousand is a smear
-#: the browser struggles to render and the user cannot read.
+#: above this many places in the viewport, return clusters instead of pins.
 CLUSTER_THRESHOLD = 400
 
-#: Target grid cells per side when clustering. 8x8 = up to 64 bubbles, which
-#: reads as a density map rather than either one blob or a fog of circles.
+#: target grid cells per side when clustering.
 CLUSTER_GRID = 8
 
-#: No cap is needed on the number of cells: the step is viewport-relative, so
-#: the grid itself bounds the output at about (CLUSTER_GRID + 1)^2. See the note
-#: in _clusters_in about the LIMIT that used to be here and why it was wrong.
 
 
 @router.get("/trips", response_model=list[TripRead])
 def list_trips(db: Session = Depends(get_db)) -> list[Trip]:
-    """Every trip, with its destinations nested.
-
-    The UI calls this on load to discover that Venice is destination 1 and where
-    to centre the map, so no id or coordinate is hardcoded in the frontend.
-
-    selectinload tells SQLAlchemy to fetch all the destinations in one extra
-    query. Without it, serialising N trips would lazily fire one query per trip
-    — the N+1 problem. With two rows seeded you would never notice; it is here
-    because this is the shape of the bug, not because it hurts yet.
-    """
+    """every trip, with destinations loaded in one extra query."""
     stmt = select(Trip).options(selectinload(Trip.destinations)).order_by(Trip.id)
     return list(db.scalars(stmt))
 
 
 def _get_destination_or_404(db: Session, destination_id: int) -> Destination:
-    """Look up a destination, or raise a clean 404.
-
-    Both place endpoints need this. Without the explicit check, a POST to a
-    destination that does not exist would reach Postgres and fail the foreign
-    key, surfacing as a 500 and an ugly traceback. A 404 with a readable
-    `detail` is the honest answer: the client asked about something absent.
-    """
+    """the destination, or a 404."""
     destination = db.get(Destination, destination_id)
     if destination is None:
         raise HTTPException(
@@ -128,12 +88,7 @@ def _get_destination_or_404(db: Session, destination_id: int) -> Destination:
 
 
 def _with_details(db: Session, places: list[Place]) -> list[PlaceRead]:
-    """Saved places, each with its OpenStreetMap details if it has any.
-
-    Details are not stored on `places` — they describe the world, not your
-    collection, and they change when a region is re-imported. So they are
-    looked up by source_ref, in one query for the whole list.
-    """
+    """saved places with their osm details, looked up in one query."""
     details = ask.details_for_refs(
         db, (place.source_ref for place in places if place.source_ref)
     )
@@ -149,19 +104,13 @@ def _with_details(db: Session, places: list[Place]) -> list[PlaceRead]:
 def list_places(
     destination_id: int, db: Session = Depends(get_db)
 ) -> list[PlaceRead]:
-    """The destination's saved places — the one read both views share.
-
-    The list renders all of these. The map renders the subset with coordinates.
-    Because there is a single source, switching views cannot show stale data and
-    a refresh cannot lose a pin.
-    """
+    """a destination's saved places. both the list and the map read this."""
     _get_destination_or_404(db, destination_id)
 
     stmt = (
         select(Place)
         .where(Place.destination_id == destination_id)
-        # Must-go first, then newest. desc() on a boolean puts true before
-        # false in Postgres, which is what the flag is for.
+        # must-go first, then newest.
         .order_by(Place.must_go.desc(), Place.created_at.desc(), Place.id.desc())
     )
     return _with_details(db, list(db.scalars(stmt)))
@@ -177,26 +126,14 @@ def create_place(
     payload: PlaceCreate,
     db: Session = Depends(get_db),
 ) -> PlaceRead:
-    """Save one place. This is the endpoint the Save button hits.
-
-    By the time the body of this function runs, FastAPI has already:
-      - parsed the JSON body into a PlaceCreate,
-      - rejected a blank name, an unknown category, an out-of-range coordinate,
-        or a half-dropped pin, with a 422 and a field-level message.
-
-    So there is no validation code here. That is the point of the schema.
-    """
+    """save one place. validation happens in PlaceCreate."""
     destination = _get_destination_or_404(db, destination_id)
 
-    # Build the row. destination_id comes from the URL, never the body, so the
-    # place cannot be filed under a different destination than the one the
-    # client addressed.
+    # destination_id comes from the url, never the body.
     place = Place(
         destination_id=destination.id,
         name=payload.name,
-        # payload.category is a Category (a StrEnum). str() stores the plain
-        # "restaurant" that ck_places_category expects, rather than relying on
-        # how the enum happens to serialise.
+        # store the plain string the check constraint expects.
         category=str(payload.category),
         must_go=payload.must_go,
         latitude=payload.latitude,
@@ -205,35 +142,15 @@ def create_place(
         source_ref=payload.source_ref,
     )
 
-    # Three steps, and they are genuinely different:
-    #   add    — stage the object in the Session's unit of work. No SQL yet.
-    #   commit — flush the INSERT and commit the transaction. The row is now
-    #            durable; this is the moment the save actually happens.
-    #   refresh— re-SELECT the row to pick up what the database generated:
-    #            `id` from the sequence and `created_at` from DEFAULT now().
-    #            Without it those attributes would be None in the response.
+    # refresh picks up the generated id and created_at.
     db.add(place)
     try:
         db.commit()
     except IntegrityError as exc:
-        # A constraint in the database refused the row. The one we expect here
-        # is ix_places_destination_source_ref: this OSM place is already saved
-        # to this destination.
-        #
-        # The rollback is not optional. After a failed commit the Session is in
-        # a broken state and every later query on it would fail too — including
-        # the ones serving the rest of this request.
+        # the session is unusable after a failed commit, so roll back first.
         db.rollback()
 
-        # 409 Conflict, not 400 or 500: the request was well-formed and the
-        # server is healthy, but it conflicts with the current state of the
-        # resource. That is precisely what 409 means, and the UI can tell the
-        # user "you already saved this" rather than "something went wrong".
-        #
-        # Checking the constraint name rather than returning 409 for any
-        # IntegrityError matters — a different constraint failing is a bug in
-        # our code, and should surface as a 500 rather than be mislabelled as
-        # the user's fault.
+        # 409 only for the duplicate-osm-place index; anything else is our bug.
         if "ix_places_destination_source_ref" in str(exc.orig):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -243,9 +160,7 @@ def create_place(
 
     db.refresh(place)
 
-    # Returning the saved row (rather than 201 with an empty body) lets React
-    # drop the real record — with its real id — straight into state, so the new
-    # place and its pin appear without a second round trip.
+    # return the saved row so the ui can use the real id without refetching.
     return _with_details(db, [place])[0]
 
 
@@ -258,16 +173,12 @@ def delete_place(
     place_id: int,
     db: Session = Depends(get_db),
 ) -> None:
-    """Remove one place from your collection.
-
-    Only touches `places`. The OpenStreetMap cache is untouched, so a place
-    saved from a map suggestion simply becomes a suggestion again.
-    """
+    """remove a saved place. the osm cache is untouched, so it becomes a
+    suggestion again."""
     _get_destination_or_404(db, destination_id)
 
     place = db.get(Place, place_id)
-    # The destination check matters: without it, any place id could be deleted
-    # through any destination's URL.
+    # don't allow deleting another destination's place through this url.
     if place is None or place.destination_id != destination_id:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -284,27 +195,11 @@ def get_bounding_box(
     north: Annotated[float, Query(description="Northern edge of the search box.")],
     east: Annotated[float, Query(description="Eastern edge of the search box.")],
 ) -> BoundingBox:
-    """Assemble the four edge parameters into a validated BoundingBox.
+    """build a BoundingBox from the four query params, as a dependency.
 
-    Why this exists rather than annotating the endpoint with the model directly:
-
-    - `Annotated[BoundingBox, Depends()]` calls the model as a plain
-      constructor, so a ValidationError from its validators escapes as an
-      unhandled exception and the client gets a 500 instead of a 422.
-    - `Annotated[BoundingBox, Query()]` is FastAPI 0.115's query-parameter-model
-      feature, which *does* produce a 422 — but on this version it stops
-      flattening the model as soon as the same signature also declares another
-      `Query()` parameter (our `categories`), and silently starts looking for a
-      single query param literally named "bbox". Both of those were found by
-      the tests in tests/test_nearby_api.py, which is the argument for writing
-      the error-path tests at all.
-
-    So: four explicit floats, assembled by hand, with the validation error
-    translated deliberately. Re-raising as FastAPI's own
-    RequestValidationError is the detail that matters — it means a bad bounding
-    box produces exactly the same 422 body shape as every other validation
-    failure in the API, rather than a bespoke error format for this one
-    endpoint.
+    fastapi 0.115 either returns a 500 for model validation errors
+    (Depends()) or mis-parses the params next to `categories` (Query()), so
+    the box is built by hand and errors are re-raised as a normal 422.
     """
     try:
         return BoundingBox(south=south, west=west, north=north, east=east)
@@ -315,50 +210,26 @@ def get_bounding_box(
 @router.get("/destinations/{destination_id}/nearby", response_model=NearbyResponse)
 def list_nearby(
     destination_id: int,
-    # Already validated by get_bounding_box above: corners ordered, span within
-    # the limit. A bad box is a 422 that never reaches Overpass.
+    # already validated by get_bounding_box.
     bbox: Annotated[BoundingBox, Depends(get_bounding_box)],
     categories: Annotated[
         list[Category],
-        # Repeated query params: ?categories=restaurant&categories=cafe.
-        # FastAPI validates each against the Category enum, so an unknown
-        # category is a 422 rather than a silently empty result.
+        # ?categories=restaurant&categories=cafe
         Query(description="Which kinds of place to look for."),
     ] = list(ALL_CATEGORIES),
     db: Session = Depends(get_db),
 ) -> NearbyResponse:
-    """Cached OpenStreetMap places inside this rectangle.
+    """cached osm places in a rectangle. a plain indexed read, no outside calls.
 
-    **This is a database read.** No outbound call, no `httpx`, no third party
-    in the request path at all — which is the whole point of this increment.
-    The previous version called Overpass here and took 3-30 seconds, or
-    returned a 502 when the public instance was at capacity (which, measured,
-    was most of the time). Now it is a few milliseconds and cannot fail, which
-    is what lets the map load markers automatically as you pan.
-
-    The places come from app/sync.py, which filled osm_places in the background.
-    If a region has not finished importing this returns whatever has landed so
-    far, with `coverage` saying so — partial data beats an error, and an
-    explanation beats a blank map.
-
-    **Two lists, one envelope.** A zoomed-out view of Manhattan can hold tens of
-    thousands of places; drawing them is useless and shipping them is wasteful.
-    So the server counts first and decides:
-
-      - few enough to draw  -> `mode="places"`,   real pins
-      - too many            -> `mode="clusters"`, counts per grid cell
-
-    The decision is made from the **actual count**, not from a zoom level the
-    client reports. Zoom alone would cluster an empty suburb and send thousands
-    of pins for midtown — density varies far more than zoom does.
+    counts first: few enough returns pins (`mode="places"`), too many returns
+    grid counts (`mode="clusters"`). decided by the real count, not the zoom.
+    `coverage` says whether the area has been imported at all.
     """
     _get_destination_or_404(db, destination_id)
 
     category_values = [str(category) for category in categories]
 
-    # The filter every query below shares. Built once as a list of conditions
-    # rather than repeated, so the count and the fetch can never disagree about
-    # what they are counting.
+    # shared by the count and the fetch, so they always agree.
     in_viewport = (
         OsmPlace.latitude >= bbox.south,
         OsmPlace.latitude <= bbox.north,
@@ -367,8 +238,6 @@ def list_nearby(
         OsmPlace.category.in_(category_values),
     )
 
-    # Served by ix_osm_places_coords. A count is cheap enough to always do, and
-    # it is what makes the mode decision honest.
     total = db.scalar(
         select(func.count()).select_from(OsmPlace).where(*in_viewport)
     ) or 0
@@ -385,11 +254,7 @@ def list_nearby(
 
     places = list(db.scalars(select(OsmPlace).where(*in_viewport)))
 
-    # to_suggestions marks which are already saved, in one query for the whole
-    # set rather than one per place — the per-item version would be the N+1
-    # problem again. It is scoped to the destination: the places are global,
-    # but *your collection* is not. The same café is "already saved" in Venice
-    # and not in Mestre, and that is correct.
+    # "already saved" is per destination, even though places are global.
     return NearbyResponse(
         mode="places",
         total=total,
@@ -406,32 +271,30 @@ def ask_pina(
     llm: Llm = Depends(get_llm),
     geocoder: NominatimClient = Depends(get_geocoder),
 ) -> AskResponse:
-    """Ask Pina: "Italian with outdoor seating near Alfama" -> real places.
+    """ask pina: "italian with outdoor seating near alfama" -> real places.
 
-    Three steps, and only the first involves the LLM:
+    1. the llm turns the question into a SearchIntent (app/llm.py).
+    2. a named area is geocoded inside the destination.
+    3. sql finds matching places, closest first (app/ask.py).
 
-      1. The local model turns the question into a SearchIntent (app/llm.py).
-         It is offered only the cuisines that exist here, and cannot name a
-         place.
-      2. A named area is found with the geocoder, inside this destination.
-      3. Plain SQL finds matching places, closest first (app/ask.py).
-
-    The interpretation is returned alongside the results, so the UI can show
-    what was understood — a wrong guess is then visible, not silent.
+    the interpretation is returned too, so the ui can show what was understood.
     """
     destination = _get_destination_or_404(db, destination_id)
     destination_box = ask.destination_box(destination)
 
     try:
         intent = llm.parse(
-            payload.question, destination.name, ask.cuisines_in(db, destination_box)
+            payload.question,
+            destination.name,
+            ask.cuisines_in(db, destination_box),
+            previous=payload.previous,
         )
     except LlmUnavailable as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
         ) from exc
     except LlmError as exc:
-        # 502: our server is fine, the model behind it gave a bad answer.
+        # 502: the model behind us gave a bad answer.
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)
         ) from exc
@@ -439,9 +302,8 @@ def ask_pina(
     area = ask.resolve_area(intent, destination, payload.viewport, geocoder)
     total, results = ask.search(db, destination.id, intent, area.box)
 
-    # Nothing has every feature? Try once without them. Feature tags are the
-    # sparsest data we have, so "none recorded" is far likelier than "none
-    # exist" — and the response says exactly which ones were dropped.
+    # nothing has every feature? try once without them, and say which were
+    # dropped. feature tags are sparse, so "not recorded" is the likely reason.
     dropped: list[Feature] = []
     if total == 0 and intent.features:
         relaxed = intent.model_copy(update={"features": []})
@@ -450,6 +312,7 @@ def ask_pina(
             dropped = list(intent.features)
 
     return AskResponse(
+        reply=ask.describe(intent, area, total, dropped),
         interpretation=intent,
         area_label=area.label,
         area_found=area.found,
@@ -462,25 +325,16 @@ def ask_pina(
 def _clusters_in(
     db: Session, bbox: BoundingBox, in_viewport: tuple
 ) -> list[Cluster]:
-    """Group the viewport into a grid and count each cell.
+    """group the viewport into a grid and count each cell.
 
-    The grid step is derived from the viewport, so you always get roughly
-    CLUSTER_GRID x CLUSTER_GRID cells whatever the zoom — the bubbles stay the
-    same visual size as you zoom out, rather than merging into one.
-
-    `avg(latitude)` rather than the cell centre: a bubble then sits on the
-    actual centre of mass of its places, so a cluster over a coastline appears
-    over the town and not out at sea.
-
-    Plain SQL, no PostGIS. Real spatial clustering (ST_ClusterKMeans) produces
-    prettier groupings, but needs the extension and a much slower query for a
-    result nobody would notice at this scale.
+    the step is relative to the viewport, so there are always about
+    CLUSTER_GRID x CLUSTER_GRID cells. bubbles sit at the cells' average
+    position rather than their centre.
     """
     lat_step = max((bbox.north - bbox.south) / CLUSTER_GRID, 1e-6)
     lon_step = max((bbox.east - bbox.west) / CLUSTER_GRID, 1e-6)
 
-    # floor(x / step) is the cell index. Grouping by the *expression* keeps this
-    # to one pass with no temporary table.
+    # floor(x / step) is the cell index.
     lat_cell = func.floor(OsmPlace.latitude / lat_step)
     lon_cell = func.floor(OsmPlace.longitude / lon_step)
 
@@ -492,20 +346,10 @@ def _clusters_in(
         )
         .where(*in_viewport)
         .group_by(lat_cell, lon_cell)
-        # Biggest first, purely so the renderer draws the dense bubbles on top.
+        # biggest first, so dense bubbles draw on top.
         .order_by(func.count().desc())
-        #
-        # Deliberately NO LIMIT. There was one, and it was a bug: the grid step
-        # is derived from the viewport, so the cell count is already bounded at
-        # roughly CLUSTER_GRID + 1 per side (the viewport edges can straddle
-        # cells, so 8 becomes 9). A LIMIT on top of that silently dropped cells
-        # while `total` still counted their places — so the bubbles no longer
-        # added up to the total.
-        #
-        # Caught by the `sum(counts) == total` assertion in
-        # tests/test_nearby_api.py, which is exactly why that assertion is
-        # worth writing: the truncated response still looked perfectly
-        # plausible.
+        # no limit: the grid already bounds the cell count, and a limit would
+        # make the counts stop adding up to `total`.
     ).all()
 
     return [
@@ -515,17 +359,10 @@ def _clusters_in(
 
 
 def _coverage_for(db: Session, bbox: BoundingBox) -> Coverage:
-    """Do we have imported data for this viewport?
+    """whether ready extracts cover this viewport.
 
-    Compared against the bounding boxes of ready extracts. The point is to
-    distinguish an empty area from an unimported one — an empty map with no
-    explanation is what made two earlier versions of this feature feel broken.
-
-    Deliberately approximate: a single extract containing the whole viewport is
-    COVERED, any overlap is PARTIAL, no overlap is MISSING. A viewport spanning
-    two adjacent imported regions reports PARTIAL even though it is really
-    fully covered. Resolving that needs genuine geometry union, and being
-    slightly pessimistic is the right direction for this to err in.
+    approximate: one extract containing it all is COVERED, any overlap is
+    PARTIAL, none is MISSING. a view spanning two regions reports PARTIAL.
     """
     extracts = list(
         db.execute(
@@ -561,7 +398,7 @@ def _coverage_for(db: Session, bbox: BoundingBox) -> Coverage:
     return Coverage.PARTIAL if overlaps else Coverage.MISSING
 
 
-# --- destinations ----------------------------------------------------------
+# --- destinations ------------------------------------------------------------
 
 
 @router.get("/geocode", response_model=list[GeocodeCandidate])
@@ -569,16 +406,7 @@ def geocode(
     q: Annotated[str, Query(min_length=1, description="A place name to look up.")],
     geocoder: NominatimClient = Depends(get_geocoder),
 ) -> list[GeocodeCandidate]:
-    """Find candidate destinations for a typed name.
-
-    Returns several, deliberately — "Venice" is a real place in Italy, Florida
-    and California, so the user picks rather than us guessing.
-
-    This *does* call a third party, and that is fine here: it happens once when
-    someone types a city, not on every map movement. See the note at the top of
-    app/geocode.py on why Nominatim is the right service for this and the wrong
-    one for listing restaurants.
-    """
+    """candidate destinations for a typed name. several, so the user picks."""
     try:
         results = geocoder.search(q)
     except GeocodeError as exc:
@@ -602,11 +430,9 @@ def create_destination(
     db: Session = Depends(get_db),
     start_sync: Callable[[int], None] = Depends(get_sync_runner),
 ) -> DestinationDetail:
-    """Add a destination to a trip and start fetching its places.
+    """add a destination and start filling its places in the background.
 
-    Returns immediately with sync_state='pending'. The actual fetching happens
-    after the response is sent, so adding Lisbon is instant even though
-    populating its map takes a while.
+    returns straight away with sync_state='pending'.
     """
     trip = db.get(Trip, trip_id)
     if trip is None:
@@ -615,8 +441,7 @@ def create_destination(
             detail=f"Trip {trip_id} not found",
         )
 
-    # Shrink an oversized geocoder box to something syncable. Nominatim's
-    # "Tokyo" spans ~80km; see MAX_DESTINATION_SPAN_DEGREES in sync.py.
+    # shrink an oversized geocoder box, see MAX_DESTINATION_SPAN_DEGREES.
     south, west, north, east = clamp_area(
         payload.latitude,
         payload.longitude,
@@ -626,12 +451,8 @@ def create_destination(
         payload.east,
     )
 
-    # Resolve the region up front, so an unsupported location is reported
-    # immediately on the created destination rather than discovered minutes
-    # later when the background job gives up.
-    #
-    # Resolved from the coordinates, not the country code: that is what picks
-    # us/new-york (476 MB) over us (11,706 MB). See app/regions.py.
+    # resolve the region now, so an unsupported location shows up immediately.
+    # resolved from coordinates, not the country, to pick the smallest region.
     region: str | None = None
     unsupported: str | None = None
     try:
@@ -651,9 +472,7 @@ def create_destination(
         osm_ref=payload.osm_ref,
         country_code=payload.country_code,
         region=region,
-        # A destination we cannot auto-fill is created anyway — you can still
-        # save places by hand — but says so instead of sitting at 'pending'
-        # forever with no explanation.
+        # unsupported destinations are still created, for manual saves.
         sync_state=SyncState.PENDING if region else SyncState.FAILED,
         sync_error=unsupported,
     )
@@ -672,14 +491,8 @@ def create_destination(
 
     db.refresh(destination)
 
-    # The background work: download the region's extract if we do not have it,
-    # then parse it. FastAPI runs this after the response is sent — which is
-    # exactly why sync_destination opens its own Session rather than taking
-    # `db`: by then get_db's `finally` has closed this one.
-    #
-    # Skipped when there is no region (nothing to fetch), and when auto-import
-    # is off (a client must not be able to start a 476 MB download by typing a
-    # city name — see AUTO_IMPORT_REGIONS in config.py).
+    # runs after the response is sent. skipped without a region, or when
+    # auto-import is off (see AUTO_IMPORT_REGIONS).
     if region and settings.AUTO_IMPORT_REGIONS:
         background_tasks.add_task(start_sync, destination.id)
     elif region:
@@ -696,7 +509,7 @@ def create_destination(
 def get_destination(
     destination_id: int, db: Session = Depends(get_db)
 ) -> DestinationDetail:
-    """A destination with its sync progress. The UI polls this while syncing."""
+    """a destination with its sync progress. the ui polls this while syncing."""
     destination = _get_destination_or_404(db, destination_id)
     return _destination_detail(db, destination)
 
@@ -706,19 +519,11 @@ def get_destination(
     status_code=status.HTTP_204_NO_CONTENT,
 )
 def delete_destination(destination_id: int, db: Session = Depends(get_db)) -> None:
-    """Remove a destination and the places saved to it.
+    """remove a destination and its saved places.
 
-    Saved places go with it: the relationship's delete-orphan cascade (and
-    ON DELETE CASCADE underneath) removes them in the same transaction.
-
-    The downloaded map data is deliberately kept. osm_places and osm_extracts
-    are a global cache shared by every destination in the region, so re-adding
-    the city — or adding a neighbour — fills instantly with no new download.
-
-    **A running download is cancelled** when this was the last destination in
-    its region — otherwise deleting a city added by mistake would still pull
-    down hundreds of megabytes nobody wants. If another destination shares the
-    region, the download carries on for it.
+    the downloaded map data is kept, since it's shared by the whole region.
+    if this was the region's last destination, a running download is
+    cancelled.
     """
     destination = _get_destination_or_404(db, destination_id)
     region = destination.region
@@ -743,14 +548,7 @@ def resync_destination(
     db: Session = Depends(get_db),
     start_sync: Callable[[int], None] = Depends(get_sync_runner),
 ) -> DestinationDetail:
-    """Re-run the import, resuming whatever is incomplete.
-
-    Safe to call at any time. An already-downloaded extract is reused, a
-    partial download resumes from where it stopped, and the place upsert means
-    re-imported places are updated rather than duplicated.
-
-    Your saved places are never touched — only the osm_places cache.
-    """
+    """re-run the import, resuming whatever is incomplete. saved places are untouched."""
     destination = _get_destination_or_404(db, destination_id)
 
     destination.sync_state = SyncState.PENDING
@@ -766,15 +564,8 @@ def resync_destination(
 def _destination_detail(
     db: Session, destination: Destination
 ) -> DestinationDetail:
-    """Attach cache status to a destination.
-
-    Counted with SQL rather than len(destination.osm_places): loading several
-    thousand cached rows into Python just to count them would make polling this
-    endpoint more expensive than the import it is reporting on.
-    """
-    # Geographic, not a foreign key: osm_places is global since 0005, so "how
-    # many places does this destination have" means "how many are inside its
-    # area".
+    """a destination plus its cache status, counted in sql."""
+    # by area, since osm_places is global.
     osm_place_count = db.scalar(
         select(func.count())
         .select_from(OsmPlace)
@@ -786,9 +577,7 @@ def _destination_detail(
         )
     ) or 0
 
-    # The extract's own state is what the UI narrates during a sync —
-    # "downloading 250 MB" and "importing" are very different waits, and the
-    # destination's own sync_state cannot distinguish them.
+    # lets the ui tell a long download from a short import.
     extract_state: str | None = None
     if destination.region:
         extract_state = db.scalar(
