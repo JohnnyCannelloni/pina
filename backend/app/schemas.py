@@ -94,6 +94,43 @@ class PlaceCreate(BaseModel):
         return self
 
 
+class Feature(StrEnum):
+    """Things you can ask a place to have.
+
+    A fixed list, not free text, because the LLM's answer is constrained to it
+    (app/llm.py puts this enum in the JSON schema Ollama must follow). So the
+    model can say "outdoor_seating" but can never invent "has_a_view", which no
+    data could answer. How each one maps to OSM tags is FEATURE_TAGS in
+    app/ask.py.
+    """
+
+    OUTDOOR_SEATING = "outdoor_seating"
+    VEGETARIAN = "vegetarian"
+    VEGAN = "vegan"
+    GLUTEN_FREE = "gluten_free"
+    WHEELCHAIR = "wheelchair"
+    TAKEAWAY = "takeaway"
+    DELIVERY = "delivery"
+
+
+class PlaceDetails(BaseModel):
+    """What OpenStreetMap says about a place, beyond its name and pin.
+
+    Built from osm_places.tags by app/ask.py:details_from_tags. Every field is
+    optional because OSM coverage is patchy — about a third of restaurants
+    have a cuisine, a fifth have opening hours.
+    """
+
+    #: ["italian", "pizza"], as OSM spells them. The UI prettifies.
+    cuisine: list[str] = []
+    opening_hours: str | None = None
+    website: str | None = None
+    phone: str | None = None
+    street: str | None = None
+    #: Which of the askable features OSM records this place as having.
+    features: list[Feature] = []
+
+
 class PlaceRead(BaseModel):
     """A saved place as the API returns it."""
 
@@ -112,6 +149,10 @@ class PlaceRead(BaseModel):
     source: PlaceSource
     source_ref: str | None
     created_at: datetime
+    #: From the OSM cache, for places saved from OpenStreetMap. None for a
+    #: place typed in by hand. Not a column on `places`: details belong to the
+    #: world, not to your collection, so they are looked up by source_ref.
+    details: PlaceDetails | None = None
 
 
 class DestinationRead(BaseModel):
@@ -307,6 +348,7 @@ class Suggestion(BaseModel):
     #: True when a place with this source_ref is already in this destination.
     #: The map hides those, so you are never offered something you have saved.
     already_saved: bool
+    details: PlaceDetails | None = None
 
 
 class Cluster(BaseModel):
@@ -361,3 +403,53 @@ class NearbyResponse(BaseModel):
     coverage: Coverage
     places: list[Suggestion] = []
     clusters: list[Cluster] = []
+
+
+# --- Ask Pina ----------------------------------------------------------------
+
+
+class SearchIntent(BaseModel):
+    """What the LLM understood a question to mean — a structured search.
+
+    This is the *only* thing the LLM produces. It never names a place: the
+    places come from running this search against osm_places (app/ask.py), so
+    every result is real. The UI shows this back to the user as chips, which
+    makes a misunderstanding visible instead of silent.
+    """
+
+    category: Category | None = None
+    #: OSM cuisine values that exist in this destination ("italian").
+    cuisines: list[str] = []
+    features: list[Feature] = []
+    #: Words to look for in names, for places with no cuisine tag
+    #: ("trattoria", "pizzeria"). About two thirds of restaurants have none.
+    name_words: list[str] = []
+    #: A neighbourhood or landmark inside the destination, or None for "the
+    #: whole city" / "the current map view".
+    area: str | None = None
+
+
+class AskRequest(BaseModel):
+    question: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=300)
+    ]
+    #: The map's current view, when the map is open. Used when the question
+    #: names no area. Omitted from the Places view.
+    viewport: BoundingBox | None = None
+
+
+class AskResponse(BaseModel):
+    interpretation: SearchIntent
+    #: Where was searched, in words: "near Alfama", "in the map view".
+    area_label: str
+    #: False when the question named an area that could not be found, so the
+    #: UI can say so rather than quietly searching somewhere else.
+    area_found: bool = True
+    #: Matches before the limit, so the UI can say "25 of 140".
+    total: int
+    results: list[Suggestion]
+    #: Features that were asked for but dropped, because nothing here matched
+    #: all of them. OSM records outdoor seating for about one place in five,
+    #: so "seafood with a terrace" often has a real answer that just is not
+    #: tagged. Returned so the UI says so, rather than pretending they matched.
+    dropped_features: list[Feature] = []

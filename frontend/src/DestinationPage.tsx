@@ -9,13 +9,20 @@
  * this shape avoids.
  */
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { AddPlaceForm } from "./AddPlaceForm";
 import { deletePlace, fetchPlaces } from "./api";
+import { ASK_PAGE_SIZE, AskPina } from "./AskPina";
 import { MapView } from "./MapView";
 import { PlaceList } from "./PlaceList";
-import type { DestinationDetail, Place } from "./types";
+import type {
+  AskResponse,
+  Bounds,
+  DestinationDetail,
+  Place,
+  Suggestion,
+} from "./types";
 
 interface DestinationPageProps {
   /** The full detail, not the summary: the map needs the stored bounds and the
@@ -40,6 +47,52 @@ export function DestinationPage({
   // is set by the *list* and consumed by the *map* — the nearest common parent
   // is the only place both can reach.
   const [focusedPlaceId, setFocusedPlaceId] = useState<number | null>(null);
+
+  // Ask Pina's answer lives here, not in AskPina, because the map draws it
+  // too. `focusedRef` is the result "Show on map" should fly to.
+  const [askAnswer, setAskAnswer] = useState<AskResponse | null>(null);
+  const [focusedRef, setFocusedRef] = useState<string | null>(null);
+  // How many results are showing. Here, not in AskPina, because the map draws
+  // the same slice — the list and the pins must always agree.
+  const [askShown, setAskShown] = useState(ASK_PAGE_SIZE);
+
+  // The map's visible area, for questions that name no area. A ref, not
+  // state: it changes on every pan and nothing needs to re-render for it.
+  const viewport = useRef<Bounds | null>(null);
+  const handleViewportChange = useCallback((bounds: Bounds) => {
+    viewport.current = bounds;
+  }, []);
+
+  // "Show on map" has to *take you* to the map, not just switch the tab: the
+  // map sits below the Ask results, often off-screen. A counter rather than a
+  // boolean, so asking twice in a row scrolls twice.
+  const viewCard = useRef<HTMLDivElement>(null);
+  const [scrollRequest, setScrollRequest] = useState(0);
+  useEffect(() => {
+    if (scrollRequest === 0) {
+      return;
+    }
+    const reduceMotion = window.matchMedia(
+      "(prefers-reduced-motion: reduce)",
+    ).matches;
+    viewCard.current?.scrollIntoView({
+      behavior: reduceMotion ? "auto" : "smooth",
+      block: "start",
+    });
+  }, [scrollRequest]);
+
+  /** Switch to the map and bring it on screen. */
+  function goToMap() {
+    setView("map");
+    setScrollRequest((count) => count + 1);
+  }
+
+  // A different destination starts with no answer — Lisbon's results have no
+  // business on New York's map.
+  useEffect(() => {
+    setAskAnswer(null);
+    setFocusedRef(null);
+  }, [destination.id]);
 
   // This effect is why a refresh keeps your places: on mount, state starts
   // empty and is filled from the database. Nothing is cached in the browser —
@@ -120,7 +173,25 @@ export function DestinationPage({
    */
   function handleFocusPlace(placeId: number) {
     setFocusedPlaceId(placeId);
-    setView("map");
+    goToMap();
+  }
+
+  function handleAnswer(answer: AskResponse | null) {
+    setAskAnswer(answer);
+    setFocusedRef(null);
+    setAskShown(ASK_PAGE_SIZE);
+  }
+
+  /** "Show on map" on an Ask result. A result you have since saved is now a
+   *  saved pin, so it is focused the same way as a row in the Places list. */
+  function handleShowResult(result: Suggestion) {
+    const saved = places.find((place) => place.source_ref === result.source_ref);
+    if (saved) {
+      handleFocusPlace(saved.id);
+      return;
+    }
+    setFocusedRef(result.source_ref);
+    goToMap();
   }
 
   return (
@@ -147,9 +218,23 @@ export function DestinationPage({
         </button>
       </div>
 
+      <AskPina
+        destination={destination}
+        places={places}
+        answer={askAnswer}
+        onAnswer={handleAnswer}
+        shown={askShown}
+        onShowMore={() => setAskShown((count) => count + ASK_PAGE_SIZE)}
+        // Only while the map is open: from the Places tab, "around here" has
+        // no meaning, so the whole destination is searched.
+        getViewport={() => (view === "map" ? viewport.current : null)}
+        onSaved={handleSaved}
+        onShowOnMap={handleShowResult}
+      />
+
       <AddPlaceForm destination={destination} onSaved={handleSaved} />
 
-      <div className="card">
+      <div className="card" ref={viewCard}>
         {/* role="tablist" + aria-selected tells a screen reader this is a view
             switcher, not two unrelated buttons. */}
         <div className="toggle" role="tablist" aria-label="View">
@@ -158,7 +243,10 @@ export function DestinationPage({
             role="tab"
             aria-selected={view === "places"}
             className={`toggle__tab${view === "places" ? " toggle__tab--active" : ""}`}
-            onClick={() => setView("places")}
+            onClick={() => {
+              setView("places");
+              setFocusedRef(null);
+            }}
           >
             Places{places.length > 0 && ` (${places.length})`}
           </button>
@@ -214,6 +302,9 @@ export function DestinationPage({
               // the suggestion with no extra wiring.
               onSaved={handleSaved}
               focusedPlaceId={focusedPlaceId}
+              askResults={askAnswer?.results.slice(0, askShown) ?? []}
+              focusedRef={focusedRef}
+              onViewportChange={handleViewportChange}
             />
           ))}
       </div>

@@ -71,5 +71,19 @@ class Settings(BaseSettings):
     # does not leave someone staring at a spinner.
     NOMINATIM_TIMEOUT_SECONDS: float = 15.0
 
+    # --- Ask Pina (a local LLM through Ollama; see app/llm.py) ---
+    #: Ollama's local API. Free, offline, nothing leaves the machine.
+    OLLAMA_URL: str = "http://localhost:11434"
+    #: Any model you have pulled. qwen3:8b measured ~5 s per question on an
+    #: M1; qwen3:4b is faster and a little less careful.
+    OLLAMA_MODEL: str = "qwen3:8b"
+    #: Generous, because the first question after a while also loads ~5 GB
+    #: of model into memory (measured ~6 s on top of the answer itself).
+    OLLAMA_TIMEOUT_SECONDS: float = 90.0
+    #: How long Ollama keeps the model loaded after a question. Long enough
+    #: that a run of questions stays fast; short enough to hand the memory
+    #: back when you stop.
+    OLLAMA_KEEP_ALIVE: str = "30m"
+
 
 settings = Settings()  # type: ignore[call-arg]  # values come from .env

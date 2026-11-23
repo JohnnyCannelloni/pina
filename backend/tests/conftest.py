@@ -145,9 +145,16 @@ class FakeGeocoder:
         self.results: list[GeocodeResult] = []
         self.error: GeocodeError | None = None
         self.queries: list[str] = []
+        self.viewboxes: list[tuple[float, float, float, float] | None] = []
 
-    def search(self, query: str) -> list[GeocodeResult]:
+    def search(
+        self,
+        query: str,
+        viewbox: tuple[float, float, float, float] | None = None,
+        limit: int = 5,
+    ) -> list[GeocodeResult]:
         self.queries.append(query)
+        self.viewboxes.append(viewbox)
         if self.error is not None:
             raise self.error
         return self.results

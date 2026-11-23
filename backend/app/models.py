@@ -31,6 +31,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -338,6 +339,17 @@ class OsmPlace(Base):
     #: so a region can be refreshed or dropped wholesale.
     region: Mapped[str] = mapped_column(String, nullable=False, index=True)
 
+    #: Added in 0006. The OSM tags worth keeping — cuisine, diet, outdoor
+    #: seating, hours, website, phone — as chosen by `place_tags` in
+    #: app/extract.py, which is the only writer. `cuisine` is a list
+    #: (["italian", "pizza"]); everything else is the tag's own string value.
+    #: NULL until the region is re-imported after 0006.
+    # none_as_null: Python None is SQL NULL, not the JSON value `null` —
+    # otherwise "no tags" would have two spellings and `IS NULL` would miss one.
+    tags: Mapped[dict[str, object] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
+
     fetched_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -354,6 +366,13 @@ class OsmPlace(Base):
         # this project does not need that yet, and saying so is part of knowing
         # when it would.
         Index("ix_osm_places_coords", "latitude", "longitude"),
+        # Serves the `tags @> ...` filters in app/ask.py. See migration 0006.
+        Index(
+            "ix_osm_places_tags",
+            "tags",
+            postgresql_using="gin",
+            postgresql_ops={"tags": "jsonb_path_ops"},
+        ),
     )
 
 

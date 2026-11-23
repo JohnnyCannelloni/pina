@@ -66,6 +66,11 @@ class GeocodeResult:
     #: extract gets downloaded — see app/regions.py. None when Nominatim does
     #: not say, in which case the destination works but cannot auto-fill.
     country_code: str | None
+    #: Nominatim's 0-1 estimate of how notable the place is. Its own result
+    #: order is a poor guide for bare names — inside Venice, "Rialto" ranks a
+    #: service road in Marghera (0.04) above the Rialto market (0.17) — so Ask
+    #: Pina picks by this instead.
+    importance: float = 0.0
 
 
 class GeocodeError(RuntimeError):
@@ -115,6 +120,11 @@ def parse_results(payload: object) -> list[GeocodeResult]:
             # search; one bad candidate should not cost the user the others.
             continue
 
+        try:
+            importance = float(item.get("importance") or 0.0)
+        except (TypeError, ValueError):
+            importance = 0.0
+
         osm_type = item.get("osm_type")
         osm_id = item.get("osm_id")
         if not osm_type or osm_id is None:
@@ -149,6 +159,7 @@ def parse_results(payload: object) -> list[GeocodeResult]:
                 east=max_lon,
                 osm_ref=f"{osm_type}/{osm_id}",
                 country_code=country_code,
+                importance=importance,
             )
         )
 
@@ -163,8 +174,17 @@ class NominatimClient:
     it repeatedly; this does not.
     """
 
-    def search(self, query: str) -> list[GeocodeResult]:
+    def search(
+        self,
+        query: str,
+        viewbox: tuple[float, float, float, float] | None = None,
+        limit: int = MAX_RESULTS,
+    ) -> list[GeocodeResult]:
         """Find candidate destinations for a typed name.
+
+        `viewbox` is (south, west, north, east). When given, only results
+        inside it are returned — Ask Pina uses this so "Centro" means *this*
+        city's centre, not the first Centro in the world.
 
         Raises GeocodeError if the service cannot be reached.
         """
@@ -174,19 +194,27 @@ class NominatimClient:
 
         logger.info("geocoding %r", cleaned)
 
+        params: dict[str, str | int] = {
+            "q": cleaned,
+            "format": "jsonv2",
+            "limit": limit,
+            # Needed for address.country_code, which decides which Geofabrik
+            # extract to download. Without it the lookup succeeds and the
+            # destination then cannot auto-fill — a failure two steps removed
+            # from its cause.
+            "addressdetails": 1,
+        }
+        if viewbox is not None:
+            south, west, north, east = viewbox
+            # Nominatim wants x1,y1,x2,y2 — longitude first. bounded=1 turns
+            # the box from a preference into a filter.
+            params["viewbox"] = f"{west},{north},{east},{south}"
+            params["bounded"] = 1
+
         try:
             response = httpx.get(
                 settings.NOMINATIM_URL,
-                params={
-                    "q": cleaned,
-                    "format": "jsonv2",
-                    "limit": MAX_RESULTS,
-                    # Needed for address.country_code, which decides which
-                    # Geofabrik extract to download. Without it the lookup
-                    # succeeds and the destination then cannot auto-fill — a
-                    # failure two steps removed from its cause.
-                    "addressdetails": 1,
-                },
+                params=params,
                 headers={"User-Agent": USER_AGENT},
                 timeout=settings.NOMINATIM_TIMEOUT_SECONDS,
                 # Nominatim redirects http -> https; following keeps a

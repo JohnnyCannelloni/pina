@@ -13,6 +13,7 @@
  */
 
 import type {
+  AskResponse,
   Bounds,
   Category,
   DestinationDetail,
@@ -181,6 +182,25 @@ export function fetchNearby(
   return request<NearbyResponse>(
     `/destinations/${destinationId}/nearby?${params.toString()}`,
   );
+}
+
+/**
+ * POST /api/destinations/{id}/ask — Ask Pina.
+ *
+ * Slow by web standards (5–15 s): a local model reads the question first.
+ * `viewport` is the map's current view, sent only while the map is open; the
+ * server searches there when the question names no area.
+ */
+export function askPina(
+  destinationId: number,
+  question: string,
+  viewport: Bounds | null,
+): Promise<AskResponse> {
+  return request<AskResponse>(`/destinations/${destinationId}/ask`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ question, viewport }),
+  });
 }
 
 /**
