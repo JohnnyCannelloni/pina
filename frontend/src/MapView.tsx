@@ -28,7 +28,7 @@ import { CategoryFilter } from "./CategoryFilter";
 import { ClusterMarkers } from "./ClusterMarkers";
 import { mustGoIcon, placeIcon } from "./leafletIcons";
 import { MapLegend } from "./MapLegend";
-import { PhotosLink } from "./PhotosLink";
+import { PlaceInfo } from "./PlaceInfo";
 import {
   CITY_ZOOM,
   LABEL_ZOOM,
@@ -41,10 +41,12 @@ import { SuggestionMarkers } from "./SuggestionMarkers";
 import {
   ALL_CATEGORIES,
   CATEGORY_LABELS,
+  type Bounds,
   type Category,
   type DestinationDetail,
   type NearbyResponse,
   type Place,
+  type Suggestion,
 } from "./types";
 
 interface MapViewProps {
@@ -53,6 +55,12 @@ interface MapViewProps {
   onShowList: () => void;
   onSaved: (place: Place) => void;
   focusedPlaceId: number | null;
+  /** Ask Pina's results, drawn highlighted on top of everything else. */
+  askResults: Suggestion[];
+  /** An Ask result to fly to (its source_ref), from "Show on map". */
+  focusedRef: string | null;
+  /** Reports the visible area whenever it settles, for Ask Pina to search. */
+  onViewportChange: (bounds: Bounds) => void;
 }
 
 type PinnedPlace = Place & { latitude: number; longitude: number };
@@ -217,12 +225,77 @@ function FlyToFocused({
   return null;
 }
 
+/** Tells the parent what is on screen, on open and after every pan. A ref
+ *  upstream, not state: nothing needs to re-render when the map moves. */
+function ViewportReporter({
+  onChange,
+}: {
+  onChange: (bounds: Bounds) => void;
+}) {
+  const map = useMap();
+  const report = useCallback(() => {
+    const b = map.getBounds();
+    onChange({
+      south: b.getSouth(),
+      west: b.getWest(),
+      north: b.getNorth(),
+      east: b.getEast(),
+    });
+  }, [map, onChange]);
+
+  useMapEvents({ moveend: report });
+  useEffect(report, [report]);
+  return null;
+}
+
+/**
+ * Frames a fresh set of Ask results, or flies to one of them.
+ *
+ * Keyed on the results *array identity*: a new answer is a new array, so it is
+ * framed once, and panning around afterwards is not undone on every render.
+ */
+function ShowAskResults({
+  results,
+  focusedRef,
+  markers,
+}: {
+  results: Suggestion[];
+  focusedRef: string | null;
+  markers: React.RefObject<Map<string, L.Marker>>;
+}) {
+  const map = useMap();
+
+  useEffect(() => {
+    if (focusedRef !== null) {
+      const marker = markers.current?.get(focusedRef);
+      if (marker) {
+        map.flyTo(marker.getLatLng(), Math.max(map.getZoom(), MAX_FIT_ZOOM), {
+          duration: 0.6,
+        });
+        map.once("moveend", () => marker.openPopup());
+        return;
+      }
+    }
+    if (results.length > 0) {
+      map.fitBounds(
+        L.latLngBounds(results.map((r) => [r.latitude, r.longitude])),
+        { padding: [40, 40], maxZoom: MAX_FIT_ZOOM },
+      );
+    }
+  }, [results, focusedRef, map, markers]);
+
+  return null;
+}
+
 export function MapView({
   places,
   destination,
   onShowList,
   onSaved,
   focusedPlaceId,
+  askResults,
+  focusedRef,
+  onViewportChange,
 }: MapViewProps) {
   const [shown, setShown] = useState<ReadonlySet<Category>>(
     () => new Set(ALL_CATEGORIES),
@@ -240,6 +313,17 @@ export function MapView({
   const [zoom, setZoom] = useState(CITY_ZOOM);
 
   const markers = useRef<Map<number, L.Marker>>(new Map());
+  const askMarkers = useRef<Map<string, L.Marker>>(new Map());
+  const handleAskMarker = useCallback(
+    (sourceRef: string, marker: L.Marker | null) => {
+      if (marker) {
+        askMarkers.current.set(sourceRef, marker);
+      } else {
+        askMarkers.current.delete(sourceRef);
+      }
+    },
+    [],
+  );
 
   const pinned = useMemo(() => places.filter(hasPin), [places]);
 
@@ -265,9 +349,19 @@ export function MapView({
   const visiblePins = pinned.filter((place) => shown.has(place.category));
   // Only meaningful in "places" mode; empty in "clusters" mode because the
   // server sent counts instead.
+  // Ask results not yet saved. Not filtered by the category chips: you asked
+  // for these by name, so hiding them behind a chip would only confuse.
+  const visibleAskResults = askResults.filter(
+    (result) => !savedRefs.has(result.source_ref),
+  );
+  const askRefs = new Set(visibleAskResults.map((r) => r.source_ref));
+
   const visibleSuggestions = nearby.places.filter(
     (suggestion) =>
-      !suggestion.already_saved && !savedRefs.has(suggestion.source_ref),
+      !suggestion.already_saved &&
+      !savedRefs.has(suggestion.source_ref) &&
+      // Drawn once, as a highlighted result, rather than twice.
+      !askRefs.has(suggestion.source_ref),
   );
   const showingClusters = nearby.mode === "clusters";
 
@@ -321,6 +415,12 @@ export function MapView({
           onZoom={setZoom}
         />
         <FlyToFocused focusedPlaceId={focusedPlaceId} markers={markers} />
+        <ViewportReporter onChange={onViewportChange} />
+        <ShowAskResults
+          results={askResults}
+          focusedRef={focusedRef}
+          markers={askMarkers}
+        />
 
         {visiblePins.map((place) => (
           <Marker
@@ -348,10 +448,12 @@ export function MapView({
               >
                 {place.must_go ? "★ Must-go" : "Not marked must-go"}
               </span>
-              <PhotosLink
+              <PlaceInfo
                 name={place.name}
                 near={destination.name}
-                className="popup__photos"
+                latitude={place.latitude}
+                longitude={place.longitude}
+                details={place.details}
               />
             </Popup>
           </Marker>
@@ -372,6 +474,16 @@ export function MapView({
             showLabels={showLabels}
           />
         )}
+
+        <SuggestionMarkers
+          suggestions={visibleAskResults}
+          destinationId={destination.id}
+          destinationName={destination.name}
+          onSaved={onSaved}
+          showLabels
+          highlighted
+          onMarker={handleAskMarker}
+        />
       </MapContainer>
 
       <MapLegend />

@@ -85,6 +85,191 @@ body {
   margin-bottom: 1rem;
 }
 
+/* --- Ask Pina ----------------------------------------------------------- */
+
+.ask__form {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.ask__input {
+  flex: 1;
+  min-width: 0;
+}
+
+.ask__examples {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0.75rem 0 0;
+  color: var(--ink-muted);
+  font-size: 0.875rem;
+}
+
+.ask__answer {
+  margin-top: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.ask__answer > p {
+  margin: 0;
+}
+
+.ask__chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+/* Chips here are labels, not toggles. */
+.ask__chips .chip {
+  cursor: default;
+  min-height: 32px;
+}
+
+/* A feature that was asked for but nothing had: struck through, so it is
+   visibly *not* part of the results rather than silently ignored. */
+.ask__chip--dropped {
+  text-decoration: line-through;
+}
+
+.ask__note {
+  font-size: 0.875rem;
+  color: var(--ink-muted);
+}
+
+/* A compact result: one row of name + summary, with details on demand. */
+.ask__row {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.ask__row--open {
+  border-color: var(--accent);
+}
+
+.ask__rowhead {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding-right: 0.5rem;
+}
+
+/* The whole head is the expand toggle, so it is one big target. */
+.ask__toggle {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.5rem 0.6rem;
+  border: none;
+  background: none;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 8px;
+}
+
+.ask__toggle:hover {
+  background: #f1f5f3;
+}
+
+.ask__toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* One line each, cut with an ellipsis: a row stays one glance tall however
+   long the name or the cuisine list is. */
+.ask__toggle .place__name,
+.ask__toggle .place__meta {
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ask__chevron {
+  color: var(--ink-muted);
+  flex-shrink: 0;
+}
+
+.ask__save {
+  min-height: 36px;
+  flex-shrink: 0;
+}
+
+.ask__details {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.25rem;
+  padding: 0 0.75rem 0.6rem 2.75rem;
+}
+
+.ask__more {
+  align-self: flex-start;
+}
+
+.ask__saved {
+  font-size: 0.875rem;
+  color: var(--accent);
+  font-weight: 650;
+}
+
+/* --- place details (PlaceInfo) ---------------------------------------- */
+
+.info {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  font-size: 0.875rem;
+  margin-top: 0.2rem;
+}
+
+.info__muted {
+  color: var(--ink-muted);
+  /* Opening hours can be long; wrap rather than widen a popup off-screen. */
+  overflow-wrap: anywhere;
+}
+
+.info__features {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
+
+.info__feature {
+  font-size: 0.75rem;
+  padding: 0 0.45rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--ink-muted);
+}
+
+.info__links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-top: 0.15rem;
+}
+
+/* Leaflet's popup stylesheet colours every link its own blue. */
+.leaflet-popup-content .info a {
+  color: var(--accent);
+}
+
+.leaflet-popup-content .info {
+  margin-top: 0.35rem;
+}
+
 /* --- form --------------------------------------------------------------- */
 
 .form__title {
@@ -336,13 +521,6 @@ body {
   text-decoration: underline;
 }
 
-/* In a Leaflet popup, whose own stylesheet colours every link; the more
-   specific selector keeps it in the app's accent colour. */
-.leaflet-popup-content .popup__photos {
-  display: inline-block;
-  margin-top: 0.35rem;
-  color: var(--accent);
-}
 
 .place--clickable {
   cursor: pointer;
@@ -602,6 +780,18 @@ body {
 .pina-suggestion__glyph {
   font-size: 13px;
   line-height: 1;
+}
+
+/* An Ask Pina result: the same circle, bigger (set in leafletIcons.ts) with a
+   thicker ring and a filled background — size and weight, not colour alone. */
+.pina-suggestion--ask {
+  border-width: 4px;
+  background: #e6f4f1;
+  box-shadow: 0 2px 6px rgb(0 0 0 / 0.3);
+}
+
+.pina-suggestion--ask .pina-suggestion__glyph {
+  font-size: 16px;
 }
 
 /* Cluster bubbles for a zoomed-out view. Sized inline by leafletIcons.ts, so

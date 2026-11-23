@@ -292,6 +292,104 @@ def test_import_maps_tags_and_drops_junk(
     assert {row.region for row in rows} == {REGION}
 
 
+def test_import_keeps_the_useful_tags(
+    db_session: Session, cached_extract: Path
+) -> None:
+    """The whitelisted OSM tags land in osm_places.tags, cleaned.
+
+    Each odd value here is one seen in real data: a ;-list of cuisines, a bare
+    "www." website, a contact:* key instead of the plain one, two phone numbers,
+    and a `javascript:` "website" that must never reach an <a href>.
+    """
+    write_pbf(
+        cached_extract,
+        [
+            (
+                1,
+                45.4371,
+                12.3326,
+                {
+                    "name": "Trattoria Rosa",
+                    "amenity": "restaurant",
+                    "cuisine": "Italian; pizza",
+                    "outdoor_seating": "yes",
+                    "diet:vegetarian": "only",
+                    "opening_hours": "Mo-Su 12:00-23:00",
+                    "contact:website": "www.trattoriarosa.it",
+                    "contact:phone": "+39 041 123;+39 041 456",
+                    "toilets": "yes",  # not whitelisted
+                },
+            ),
+            (
+                2,
+                45.4372,
+                12.3327,
+                {
+                    "name": "Sneaky Bar",
+                    "amenity": "cafe",
+                    "website": "javascript:alert(1)",
+                },
+            ),
+            (3, 45.4373, 12.3328, {"name": "Plain Café", "amenity": "cafe"}),
+        ],
+    )
+
+    import_extract(db_session, REGION)
+
+    tags = {
+        row.name: row.tags for row in db_session.scalars(select(OsmPlace))
+    }
+    assert tags["Trattoria Rosa"] == {
+        "cuisine": ["italian", "pizza"],
+        "outdoor_seating": "yes",
+        "diet:vegetarian": "only",
+        "opening_hours": "Mo-Su 12:00-23:00",
+        "website": "https://www.trattoriarosa.it",
+        "phone": "+39 041 123",
+    }
+    # The bad link is dropped, and with nothing else left the row has no tags.
+    assert tags["Sneaky Bar"] is None
+    assert tags["Plain Café"] is None
+
+    # A real SQL NULL, not the JSON value `null` — see none_as_null in models.py.
+    assert db_session.scalar(
+        select(func.count()).select_from(OsmPlace).where(OsmPlace.tags.is_(None))
+    ) == 2
+
+    # The containment query app/ask.py relies on: a list matches either value.
+    italian = db_session.scalars(
+        select(OsmPlace.name).where(OsmPlace.tags.contains({"cuisine": ["pizza"]}))
+    ).all()
+    assert italian == ["Trattoria Rosa"]
+
+
+def test_reimport_updates_tags(db_session: Session, cached_extract: Path) -> None:
+    """A place imported before 0006 gets its tags on the next import."""
+    write_pbf(
+        cached_extract,
+        [(1, 45.4371, 12.3326, {"name": "Rosa", "amenity": "restaurant"})],
+    )
+    import_extract(db_session, REGION)
+
+    write_pbf(
+        cached_extract,
+        [
+            (
+                1,
+                45.4371,
+                12.3326,
+                {"name": "Rosa", "amenity": "restaurant", "cuisine": "italian"},
+            )
+        ],
+    )
+    import_extract(db_session, REGION)
+
+    row = db_session.scalar(select(OsmPlace))
+    assert row is not None
+    db_session.refresh(row)
+    assert row.tags == {"cuisine": ["italian"]}
+
+
 def test_import_keeps_the_whole_region(
     db_session: Session, venice: Destination, cached_extract: Path
 ) -> None:

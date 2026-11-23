@@ -14,11 +14,12 @@
  */
 
 import { useState } from "react";
+import type L from "leaflet";
 import { Marker, Popup, Tooltip } from "react-leaflet";
 
 import { createPlace } from "./api";
 import { suggestionIcon } from "./leafletIcons";
-import { PhotosLink } from "./PhotosLink";
+import { PlaceInfo } from "./PlaceInfo";
 import { CATEGORY_LABELS, type Place, type Suggestion } from "./types";
 
 interface SuggestionMarkersProps {
@@ -28,6 +29,11 @@ interface SuggestionMarkersProps {
   onSaved: (place: Place) => void;
   /** True when zoomed in far enough that names will not overlap into mush. */
   showLabels: boolean;
+  /** Ask Pina results: drawn larger, in the accent colour, always labelled. */
+  highlighted?: boolean;
+  /** Hands each Leaflet marker up, keyed by source_ref, so "Show on map" can
+   *  find it and open its popup. Called with null when it unmounts. */
+  onMarker?: (sourceRef: string, marker: L.Marker | null) => void;
 }
 
 function SuggestionMarker({
@@ -36,12 +42,16 @@ function SuggestionMarker({
   destinationName,
   onSaved,
   showLabels,
+  highlighted,
+  onMarker,
 }: {
   suggestion: Suggestion;
   destinationId: number;
   destinationName: string;
   onSaved: (place: Place) => void;
   showLabels: boolean;
+  highlighted: boolean;
+  onMarker?: (sourceRef: string, marker: L.Marker | null) => void;
 }) {
   const [mustGo, setMustGo] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -84,7 +94,11 @@ function SuggestionMarker({
   return (
     <Marker
       position={[suggestion.latitude, suggestion.longitude]}
-      icon={suggestionIcon(suggestion.category)}
+      icon={suggestionIcon(suggestion.category, highlighted)}
+      // Drawn above the ordinary suggestions, so a result is never hidden
+      // under a neighbour.
+      zIndexOffset={highlighted ? 500 : 0}
+      ref={(instance) => onMarker?.(suggestion.source_ref, instance)}
     >
       {/* The name, drawn on the map itself when zoomed in. This is most of what
           made the map feel uninformative before: a field of identical circles
@@ -94,7 +108,7 @@ function SuggestionMarker({
           use on a phone. `interactive={false}` lets clicks fall through the
           label to the marker underneath, so a label never blocks its own
           popup. */}
-      {showLabels && (
+      {(showLabels || highlighted) && (
         <Tooltip
           permanent
           direction="right"
@@ -111,10 +125,12 @@ function SuggestionMarker({
         <span className="popup__meta">
           {CATEGORY_LABELS[suggestion.category]} · from OpenStreetMap
         </span>
-        <PhotosLink
+        <PlaceInfo
           name={suggestion.name}
           near={destinationName}
-          className="popup__photos"
+          latitude={suggestion.latitude}
+          longitude={suggestion.longitude}
+          details={suggestion.details}
         />
 
         {/* The detected category is shown before you save, rather than being
@@ -155,6 +171,8 @@ export function SuggestionMarkers({
   destinationName,
   onSaved,
   showLabels,
+  highlighted = false,
+  onMarker,
 }: SuggestionMarkersProps) {
   return (
     <>
@@ -170,6 +188,8 @@ export function SuggestionMarkers({
           destinationName={destinationName}
           onSaved={onSaved}
           showLabels={showLabels}
+          highlighted={highlighted}
+          onMarker={onMarker}
         />
       ))}
     </>

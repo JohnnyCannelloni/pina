@@ -11,7 +11,12 @@
  */
 
 import { PhotosLink } from "./PhotosLink";
-import { CATEGORY_ICONS, CATEGORY_LABELS, type Place } from "./types";
+import {
+  CATEGORY_ICONS,
+  CATEGORY_LABELS,
+  formatCuisine,
+  type Place,
+} from "./types";
 
 interface PlaceListProps {
   places: Place[];
@@ -54,6 +59,10 @@ export function PlaceList({
               <span className="place__name">{place.name}</span>
               <span className="place__meta">
                 {CATEGORY_LABELS[place.category]}
+                {/* Just the cuisine: a list row stays one glance long. Hours,
+                    website and phone are in the map popup. */}
+                {place.details && place.details.cuisine.length > 0 &&
+                  ` · ${place.details.cuisine.map(formatCuisine).join(", ")}`}
                 {place.latitude === null ? (
                   <span className="place__nopin"> · no pin</span>
                 ) : (
@@ -90,7 +99,12 @@ export function PlaceList({
               </button>
             )}
             <div className="place__actions">
-              <PhotosLink name={place.name} near={destinationName} />
+              <PhotosLink
+                name={place.name}
+                near={destinationName}
+                latitude={place.latitude}
+                longitude={place.longitude}
+              />
               <button
                 type="button"
                 className="linkbutton place__delete"

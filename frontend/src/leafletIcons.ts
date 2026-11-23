@@ -107,16 +107,26 @@ export function clusterIcon(count: number): L.DivIcon {
   });
 }
 
-export function suggestionIcon(category: string): L.DivIcon {
+/**
+ * `highlighted` is an Ask Pina result: the same circle, bigger and with a thick
+ * accent ring. Size and ring, not colour alone, for the same reason as above.
+ */
+export function suggestionIcon(
+  category: string,
+  highlighted = false,
+): L.DivIcon {
   const glyph = SUGGESTION_GLYPHS[category] ?? "•";
+  const size = highlighted ? 34 : 26;
   return L.divIcon({
     html: `<span class="pina-suggestion__glyph">${glyph}</span>`,
-    className: "pina-marker pina-suggestion",
-    iconSize: [26, 26],
+    className: `pina-marker pina-suggestion${
+      highlighted ? " pina-suggestion--ask" : ""
+    }`,
+    iconSize: [size, size],
     // Centre-anchored, not bottom-anchored like the teardrop pins: a circle's
     // coordinate is its middle. Using [13, 26] here would float every
     // suggestion half a marker north of where it actually is.
-    iconAnchor: [13, 13],
-    popupAnchor: [0, -14],
+    iconAnchor: [size / 2, size / 2],
+    popupAnchor: [0, -(size / 2 + 1)],
   });
 }

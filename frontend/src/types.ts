@@ -27,6 +27,38 @@ export const ALL_CATEGORIES: readonly Category[] = [
  */
 export type PlaceSource = "manual" | "osm";
 
+/** Things you can ask a place to have. Matches Feature in schemas.py. */
+export type Feature =
+  | "outdoor_seating"
+  | "vegetarian"
+  | "vegan"
+  | "gluten_free"
+  | "wheelchair"
+  | "takeaway"
+  | "delivery";
+
+export const FEATURE_LABELS: Record<Feature, string> = {
+  outdoor_seating: "Outdoor seating",
+  vegetarian: "Vegetarian",
+  vegan: "Vegan",
+  gluten_free: "Gluten-free",
+  wheelchair: "Wheelchair access",
+  takeaway: "Takeaway",
+  delivery: "Delivery",
+};
+
+/** What OpenStreetMap says about a place. Every field may be missing — OSM
+ *  coverage is patchy. Matches PlaceDetails in schemas.py. */
+export interface PlaceDetails {
+  /** OSM spellings, e.g. ["italian", "coffee_shop"]. See formatCuisine. */
+  cuisine: string[];
+  opening_hours: string | null;
+  website: string | null;
+  phone: string | null;
+  street: string | null;
+  features: Feature[];
+}
+
 /** A saved place. `latitude`/`longitude` are null when it has no pin. */
 export interface Place {
   id: number;
@@ -42,6 +74,8 @@ export interface Place {
   source_ref: string | null;
   /** ISO 8601 string; JSON has no date type. */
   created_at: string;
+  /** From the OSM cache for places saved from the map; null for manual ones. */
+  details: PlaceDetails | null;
 }
 
 /**
@@ -59,6 +93,7 @@ export interface Suggestion {
   latitude: number;
   longitude: number;
   already_saved: boolean;
+  details: PlaceDetails | null;
 }
 
 /** One grid cell of a zoomed-out view: how many places, and where they are.
@@ -92,6 +127,29 @@ export interface NearbyResponse {
   coverage: Coverage;
   places: Suggestion[];
   clusters: Cluster[];
+}
+
+/** What the local LLM understood a question to mean. It never names a place;
+ *  this is a search. Matches SearchIntent in schemas.py. */
+export interface SearchIntent {
+  category: Category | null;
+  cuisines: string[];
+  features: Feature[];
+  name_words: string[];
+  area: string | null;
+}
+
+/** Matches AskResponse in schemas.py. */
+export interface AskResponse {
+  interpretation: SearchIntent;
+  /** "near Alfama", "in the map view", "in Lisboa". */
+  area_label: string;
+  /** False when the named area could not be found and the search widened. */
+  area_found: boolean;
+  total: number;
+  results: Suggestion[];
+  /** Asked-for features nothing here had; the search ran without them. */
+  dropped_features: Feature[];
 }
 
 /** The map rectangle to search inside. Matches BoundingBox in schemas.py. */
@@ -204,3 +262,10 @@ export const CATEGORY_ICONS: Record<Category, string> = {
   cafe: "☕",
   sight: "🏛️",
 };
+
+/** "italian_pizza" -> "Italian pizza". OSM's spellings are lowercase with
+ *  underscores; this is the only place that knows how to show them. */
+export function formatCuisine(cuisine: string): string {
+  const words = cuisine.replace(/_/g, " ");
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}

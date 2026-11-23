@@ -67,6 +67,86 @@ TOURISM_CATEGORIES: dict[str, Category] = {
     "viewpoint": Category.SIGHT,
 }
 
+# --- OSM tags worth keeping --------------------------------------------------
+#
+# Copied verbatim into osm_places.tags (migration 0006). Yes/no-style tags keep
+# OSM's own value ("yes", "no", "only", "limited") rather than being squashed to
+# a boolean: "only" (a vegan-only café) is worth more than "yes", and the search
+# in app/ask.py decides which values count as a match.
+FEATURE_TAGS: tuple[str, ...] = (
+    "outdoor_seating",
+    "diet:vegetarian",
+    "diet:vegan",
+    "diet:gluten_free",
+    "wheelchair",
+    "takeaway",
+    "delivery",
+)
+
+#: Free text kept as written. Shown to the user; never used to filter.
+TEXT_TAGS: tuple[str, ...] = ("opening_hours", "addr:street")
+
+
+def _clean_website(value: str | None) -> str | None:
+    """A website the UI can safely put in a link, or None.
+
+    This text ends up in an <a href>, so only http(s) is accepted — a
+    `javascript:` URL in OSM data would otherwise run in the user's browser.
+    A bare "www.example.pt" is common in OSM and gets https:// added.
+    """
+    if not value:
+        return None
+    url = value.split(";")[0].strip()
+    lowered = url.lower()
+    if lowered.startswith(("http://", "https://")):
+        return url
+    if lowered.startswith("www."):
+        return f"https://{url}"
+    return None
+
+
+def place_tags(tags: object) -> dict[str, object] | None:
+    """The subset of a node's OSM tags that osm_places keeps.
+
+    `tags` is anything with a `.get(key)`: an osmium TagList in the importer, a
+    plain dict in tests. Returns None rather than {} when nothing is worth
+    keeping, so "no details" has one representation in the database.
+    """
+    kept: dict[str, object] = {}
+
+    # Cuisine is a ;-separated list in OSM ("italian;pizza"). Stored as a JSON
+    # list so `tags @> '{"cuisine": ["italian"]}'` matches either value.
+    cuisine = tags.get("cuisine")  # type: ignore[attr-defined]
+    if cuisine:
+        values = [
+            part.strip().lower().replace(" ", "_")
+            for part in cuisine.split(";")
+            if part.strip()
+        ]
+        if values:
+            kept["cuisine"] = values
+
+    for key in FEATURE_TAGS + TEXT_TAGS:
+        value = tags.get(key)  # type: ignore[attr-defined]
+        if value:
+            kept[key] = value.strip()
+
+    website = _clean_website(
+        tags.get("website") or tags.get("contact:website")  # type: ignore[attr-defined]
+    )
+    if website:
+        kept["website"] = website
+
+    phone = tags.get("phone") or tags.get("contact:phone")  # type: ignore[attr-defined]
+    if phone:
+        # Several numbers are ;-separated. The first is the one to dial.
+        first = phone.split(";")[0].strip()
+        if first:
+            kept["phone"] = first
+
+    return kept or None
+
+
 #: Rows per INSERT. Large enough that 1,700 places is one or two statements,
 #: small enough that a country with 200,000 cafés does not build a single
 #: enormous statement and exhaust memory.
@@ -256,6 +336,7 @@ class _PoiHandler:
                 "latitude": location.lat,
                 "longitude": location.lon,
                 "region": self._region,
+                "tags": place_tags(tags),
                 "fetched_at": datetime.now(UTC),
             }
         )
@@ -276,6 +357,9 @@ def _flush(db: Session, rows: list[dict[str, object]]) -> int:
                 "latitude": statement.excluded.latitude,
                 "longitude": statement.excluded.longitude,
                 "region": statement.excluded.region,
+                # Without this a re-import would keep stale tags forever — and
+                # rows imported before 0006 would never get any.
+                "tags": statement.excluded.tags,
                 "fetched_at": statement.excluded.fetched_at,
             },
         )

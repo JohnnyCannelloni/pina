@@ -10,6 +10,7 @@
     POST /api/destinations/{id}/places         save a place
     DELETE /api/destinations/{id}/places/{pid} remove a saved place
     GET  /api/destinations/{id}/nearby         cached OSM places you could save
+    POST /api/destinations/{id}/ask            Ask Pina: a question -> places
 
 Note what `nearby` is now: a plain indexed SELECT against our own osm_places
 table. It used to call Overpass on every request, which is why it took seconds
@@ -38,9 +39,11 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
+from app import ask
 from app.config import settings
 from app.db import get_db
 from app.geocode import GeocodeError, NominatimClient, get_geocoder
+from app.llm import Llm, LlmError, LlmUnavailable, get_llm
 from app.models import (
     Category,
     Destination,
@@ -53,16 +56,18 @@ from app.models import (
 )
 from app.regions import UnsupportedRegion, resolve_region
 from app.schemas import (
+    AskRequest,
+    AskResponse,
     BoundingBox,
     Cluster,
     Coverage,
     DestinationCreate,
     DestinationDetail,
+    Feature,
     GeocodeCandidate,
     NearbyResponse,
     PlaceCreate,
     PlaceRead,
-    Suggestion,
     TripRead,
 )
 from app.sync import cancel_download, clamp_area, get_sync_runner
@@ -122,10 +127,28 @@ def _get_destination_or_404(db: Session, destination_id: int) -> Destination:
     return destination
 
 
+def _with_details(db: Session, places: list[Place]) -> list[PlaceRead]:
+    """Saved places, each with its OpenStreetMap details if it has any.
+
+    Details are not stored on `places` — they describe the world, not your
+    collection, and they change when a region is re-imported. So they are
+    looked up by source_ref, in one query for the whole list.
+    """
+    details = ask.details_for_refs(
+        db, (place.source_ref for place in places if place.source_ref)
+    )
+    return [
+        PlaceRead.model_validate(place).model_copy(
+            update={"details": details.get(place.source_ref or "")}
+        )
+        for place in places
+    ]
+
+
 @router.get("/destinations/{destination_id}/places", response_model=list[PlaceRead])
 def list_places(
     destination_id: int, db: Session = Depends(get_db)
-) -> list[Place]:
+) -> list[PlaceRead]:
     """The destination's saved places — the one read both views share.
 
     The list renders all of these. The map renders the subset with coordinates.
@@ -141,7 +164,7 @@ def list_places(
         # false in Postgres, which is what the flag is for.
         .order_by(Place.must_go.desc(), Place.created_at.desc(), Place.id.desc())
     )
-    return list(db.scalars(stmt))
+    return _with_details(db, list(db.scalars(stmt)))
 
 
 @router.post(
@@ -153,7 +176,7 @@ def create_place(
     destination_id: int,
     payload: PlaceCreate,
     db: Session = Depends(get_db),
-) -> Place:
+) -> PlaceRead:
     """Save one place. This is the endpoint the Save button hits.
 
     By the time the body of this function runs, FastAPI has already:
@@ -223,7 +246,7 @@ def create_place(
     # Returning the saved row (rather than 201 with an empty body) lets React
     # drop the real record — with its real id — straight into state, so the new
     # place and its pin appear without a second round trip.
-    return place
+    return _with_details(db, [place])[0]
 
 
 @router.delete(
@@ -362,36 +385,77 @@ def list_nearby(
 
     places = list(db.scalars(select(OsmPlace).where(*in_viewport)))
 
-    # Which of these are already saved? One query for the whole set rather than
-    # one per place — the per-item version would be the N+1 problem again.
-    #
-    # Note this is still scoped to the destination: the places are global, but
-    # *your collection* is not. The same café is "already saved" in Venice and
-    # not in Mestre, and that is correct.
-    saved_refs = set(
-        db.scalars(
-            select(Place.source_ref).where(
-                Place.destination_id == destination_id,
-                Place.source_ref.is_not(None),
-            )
-        )
-    )
-
+    # to_suggestions marks which are already saved, in one query for the whole
+    # set rather than one per place — the per-item version would be the N+1
+    # problem again. It is scoped to the destination: the places are global,
+    # but *your collection* is not. The same café is "already saved" in Venice
+    # and not in Mestre, and that is correct.
     return NearbyResponse(
         mode="places",
         total=total,
         coverage=coverage,
-        places=[
-            Suggestion(
-                source_ref=place.source_ref,
-                name=place.name,
-                category=Category(place.category),
-                latitude=place.latitude,
-                longitude=place.longitude,
-                already_saved=place.source_ref in saved_refs,
-            )
-            for place in places
-        ],
+        places=ask.to_suggestions(db, destination_id, places),
+    )
+
+
+@router.post("/destinations/{destination_id}/ask", response_model=AskResponse)
+def ask_pina(
+    destination_id: int,
+    payload: AskRequest,
+    db: Session = Depends(get_db),
+    llm: Llm = Depends(get_llm),
+    geocoder: NominatimClient = Depends(get_geocoder),
+) -> AskResponse:
+    """Ask Pina: "Italian with outdoor seating near Alfama" -> real places.
+
+    Three steps, and only the first involves the LLM:
+
+      1. The local model turns the question into a SearchIntent (app/llm.py).
+         It is offered only the cuisines that exist here, and cannot name a
+         place.
+      2. A named area is found with the geocoder, inside this destination.
+      3. Plain SQL finds matching places, closest first (app/ask.py).
+
+    The interpretation is returned alongside the results, so the UI can show
+    what was understood — a wrong guess is then visible, not silent.
+    """
+    destination = _get_destination_or_404(db, destination_id)
+    destination_box = ask.destination_box(destination)
+
+    try:
+        intent = llm.parse(
+            payload.question, destination.name, ask.cuisines_in(db, destination_box)
+        )
+    except LlmUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    except LlmError as exc:
+        # 502: our server is fine, the model behind it gave a bad answer.
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)
+        ) from exc
+
+    area = ask.resolve_area(intent, destination, payload.viewport, geocoder)
+    total, results = ask.search(db, destination.id, intent, area.box)
+
+    # Nothing has every feature? Try once without them. Feature tags are the
+    # sparsest data we have, so "none recorded" is far likelier than "none
+    # exist" — and the response says exactly which ones were dropped.
+    dropped: list[Feature] = []
+    if total == 0 and intent.features:
+        relaxed = intent.model_copy(update={"features": []})
+        total, results = ask.search(db, destination.id, relaxed, area.box)
+        if total:
+            dropped = list(intent.features)
+
+    return AskResponse(
+        interpretation=intent,
+        area_label=area.label,
+        area_found=area.found,
+        total=total,
+        results=results,
+        dropped_features=dropped,
     )
 
 
