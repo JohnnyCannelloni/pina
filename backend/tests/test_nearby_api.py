@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
-from app.models import Destination, ExtractState, OsmExtract, OsmPlace
+from app.models import Destination, OsmPlace, SyncState
 from app.routes import CLUSTER_THRESHOLD
 
 # a box around central venice.
@@ -19,9 +19,8 @@ def cache_place(
     category: str,
     latitude: float,
     longitude: float,
-    region: str = "europe/italy",
 ) -> None:
-    """put one place in the global osm cache, as an import would."""
+    """put one place in the global osm cache, as a sync would."""
     db.add(
         OsmPlace(
             source_ref=source_ref,
@@ -29,7 +28,6 @@ def cache_place(
             category=category,
             latitude=latitude,
             longitude=longitude,
-            region=region,
         )
     )
     db.commit()
@@ -55,7 +53,6 @@ def cache_many(
                 "category": "restaurant",
                 "latitude": south + (north - south) * (row / side),
                 "longitude": west + (east - west) * (column / side),
-                "region": "europe/italy",
                 "fetched_at": datetime.now(UTC),
             }
         )
@@ -63,23 +60,28 @@ def cache_many(
     db.commit()
 
 
-def ready_extract(
+def synced_destination(
     db: Session,
-    region: str,
+    trip_id: int,
     south: float,
     west: float,
     north: float,
     east: float,
+    state: SyncState = SyncState.READY,
 ) -> None:
-    """record a region as imported, covering the given box."""
+    """a destination whose box has been synced (or not, per `state`)."""
     db.add(
-        OsmExtract(
-            region=region,
-            state=ExtractState.READY,
+        Destination(
+            trip_id=trip_id,
+            name=f"Area {south},{west}",
+            osm_ref=f"relation/{south}{west}",
+            latitude=(south + north) / 2,
+            longitude=(west + east) / 2,
             south=south,
             west=west,
             north=north,
             east=east,
+            sync_state=state,
         )
     )
     db.commit()
@@ -248,19 +250,19 @@ def test_cluster_positions_sit_inside_the_viewport(
 # --- coverage ----------------------------------------------------------------
 
 
-def test_coverage_missing_when_nothing_is_imported(
+def test_coverage_missing_when_nothing_is_synced(
     client: TestClient, venice: Destination
 ) -> None:
-    """an empty map says why it's empty."""
+    """an empty map says why it's empty. (the seeded venice is still pending.)"""
     body = client.get(f"/api/destinations/{venice.id}/nearby", params=BBOX).json()
     assert body["coverage"] == "missing"
     assert body["total"] == 0
 
 
-def test_coverage_covered_when_an_extract_contains_the_viewport(
+def test_coverage_covered_when_a_synced_destination_contains_the_viewport(
     client: TestClient, venice: Destination, db_session: Session
 ) -> None:
-    ready_extract(db_session, "europe/italy", 35.0, 6.0, 47.0, 19.0)
+    synced_destination(db_session, venice.trip_id, 45.38, 12.25, 45.50, 12.40)
 
     body = client.get(f"/api/destinations/{venice.id}/nearby", params=BBOX).json()
     assert body["coverage"] == "covered"
@@ -269,12 +271,23 @@ def test_coverage_covered_when_an_extract_contains_the_viewport(
 def test_coverage_partial_when_the_viewport_overhangs(
     client: TestClient, venice: Destination, db_session: Session
 ) -> None:
-    """a viewport half inside an imported region is partial."""
+    """a viewport half inside a synced area is partial."""
     # covers only the southern half of the box.
-    ready_extract(db_session, "europe/italy", 45.300, 12.000, 45.4375, 13.000)
+    synced_destination(db_session, venice.trip_id, 45.300, 12.000, 45.4375, 13.000)
 
     body = client.get(f"/api/destinations/{venice.id}/nearby", params=BBOX).json()
     assert body["coverage"] == "partial"
+
+
+def test_coverage_ignores_destinations_that_have_not_synced(
+    client: TestClient, venice: Destination, db_session: Session
+) -> None:
+    synced_destination(
+        db_session, venice.trip_id, 45.38, 12.25, 45.50, 12.40, state=SyncState.FAILED
+    )
+
+    body = client.get(f"/api/destinations/{venice.id}/nearby", params=BBOX).json()
+    assert body["coverage"] == "missing"
 
 
 def test_nearby_404s_for_an_unknown_destination(client: TestClient) -> None:

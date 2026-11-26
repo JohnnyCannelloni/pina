@@ -152,20 +152,9 @@ export interface Destination {
   synced_at: string | null;
 }
 
-/** state of a region's extract. download and import are separate steps. */
-export type ExtractState =
-  | "pending"
-  | "downloading"
-  | "importing"
-  | "ready"
-  | "failed";
-
 /** destination plus cache status, polled while places load. */
 export interface DestinationDetail extends Destination {
   osm_place_count: number;
-  /** geofabrik region, e.g. "portugal". null when no region covers it. */
-  region: string | null;
-  extract_state: ExtractState | null;
 }
 
 export interface Trip {

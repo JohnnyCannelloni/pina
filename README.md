@@ -10,7 +10,8 @@ and follow up with *"only vegan ones"* or *"what about Baixa?"*. Everything runs
 locally and needs no API keys.
 
 **Stack:** FastAPI, PostgreSQL, SQLAlchemy, Alembic, React, TypeScript, Vite,
-Leaflet, OpenStreetMap (Nominatim and Geofabrik), and Ollama for the local LLM.
+Leaflet, OpenStreetMap (Nominatim and the Overpass API), and Ollama for the local
+LLM.
 
 ## Features
 
@@ -79,32 +80,32 @@ to be running.
 
 ## Map data
 
-Places come from [Geofabrik](https://download.geofabrik.de)'s OpenStreetMap
-extracts. The first city you add in a region downloads that region's file once,
-and later cities in the same region load in seconds. Pina picks the smallest
-region that contains the city:
+When you add a destination, Pina sends one query to the
+[Overpass API](https://wiki.openstreetmap.org/wiki/Overpass_API) for named
+restaurants, cafés and sights inside the destination's area, and caches them in
+Postgres. That includes places mapped as building outlines, such as many
+museums. A city usually loads in 10 to 60 seconds, and the map works from the
+cache after that.
 
-| City | Downloads | Instead of |
-| --- | --- | --- |
-| New York City | `us/new-york`, 476 MB | `us`, 11.7 GB |
-| Venice | `nord-est`, 598 MB | `italy`, 2.1 GB |
+- **Shared cache.** Places are shared by every destination. If another
+  destination has already loaded an area, adding a city inside it is instant
+  and sends no query.
+- **Size limit.** One query covers at most 0.6° per side (about 67 km north to
+  south). Larger geocoder areas are trimmed around the city centre when you add
+  them. New York City fits.
+- **When Overpass is busy.** Pina retries a busy answer (HTTP 429, 502, 503 or
+  504) up to three times. If it still fails, the destination shows the error
+  with a Retry button, and your own saved places are unaffected.
+- **Another instance.** The public instance at overpass-api.de asks for fair
+  use. To use a different one, set `OVERPASS_URL` in `backend/.env`.
 
-Downloads resume if they're interrupted. Files are cached in
-`~/.cache/pina/extracts`, and deleting that folder is safe.
-
-You can also manage this from the command line:
+You can also sync from the command line:
 
 ```bash
-python -m app.fill_places --list                     # destinations and place counts
-python -m app.fill_places --region portugal          # download and import a region
-python -m app.fill_places --list-regions --near "New York City"
+python -m app.fill_places --list               # destinations and place counts
+python -m app.fill_places --destination 2      # sync one destination
+python -m app.fill_places --all                # sync every destination
 ```
-
-Re-running `--region` on a region you already have re-imports it from the cached
-file, which is how you pick up new tags after a migration.
-
-To run Pina for other people, set `AUTO_IMPORT_REGIONS=false` so that adding a
-city can't start a large download, and import regions with `--region` instead.
 
 ## How Ask Pina works
 
@@ -129,8 +130,8 @@ pytest
 ```
 
 The tests run against `pina_test` with the real migrations, and each one is
-rolled back afterwards. The geocoder, the LLM and the downloads are faked, so
-the suite needs no network or Ollama and never touches your own data.
+rolled back afterwards. The geocoder, the LLM and Overpass are faked, so the
+suite needs no network or Ollama and never touches your own data.
 
 For the frontend:
 
@@ -160,9 +161,8 @@ backend/
     schemas.py     request and response shapes
     ask.py         ask pina's search and replies
     llm.py         the ollama client
-    extract.py     downloading and importing osm extracts
+    overpass.py    the overpass query, parsing and the place cache upsert
     sync.py        background syncing per destination
-    regions.py     picking the right geofabrik region
     geocode.py     nominatim lookups
   alembic/         migrations
   tests/

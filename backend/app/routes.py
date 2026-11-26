@@ -24,21 +24,17 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from app import ask
-from app.config import settings
 from app.db import get_db
 from app.geocode import GeocodeError, NominatimClient, get_geocoder
 from app.llm import Llm, LlmError, LlmUnavailable, get_llm
 from app.models import (
     Category,
     Destination,
-    ExtractState,
-    OsmExtract,
     OsmPlace,
     Place,
     SyncState,
     Trip,
 )
-from app.regions import UnsupportedRegion, resolve_region
 from app.schemas import (
     AskRequest,
     AskResponse,
@@ -54,7 +50,7 @@ from app.schemas import (
     PlaceRead,
     TripRead,
 )
-from app.sync import cancel_download, clamp_area, get_sync_runner
+from app.sync import clamp_area, get_sync_runner
 
 router = APIRouter(prefix="/api")
 
@@ -359,27 +355,25 @@ def _clusters_in(
 
 
 def _coverage_for(db: Session, bbox: BoundingBox) -> Coverage:
-    """whether ready extracts cover this viewport.
+    """whether synced destinations cover this viewport.
 
-    approximate: one extract containing it all is COVERED, any overlap is
-    PARTIAL, none is MISSING. a view spanning two regions reports PARTIAL.
+    any trip's destinations count, since osm_places is shared. approximate:
+    one synced area containing it all is COVERED, any overlap is PARTIAL, none
+    is MISSING. a view spanning two adjacent areas reports PARTIAL.
     """
-    extracts = list(
+    areas = list(
         db.execute(
             select(
-                OsmExtract.south,
-                OsmExtract.west,
-                OsmExtract.north,
-                OsmExtract.east,
-            ).where(
-                OsmExtract.state == ExtractState.READY,
-                OsmExtract.south.is_not(None),
-            )
+                Destination.south,
+                Destination.west,
+                Destination.north,
+                Destination.east,
+            ).where(Destination.sync_state == SyncState.READY)
         ).all()
     )
 
     overlaps = False
-    for south, west, north, east in extracts:
+    for south, west, north, east in areas:
         if (
             south <= bbox.south
             and north >= bbox.north
@@ -451,15 +445,6 @@ def create_destination(
         payload.east,
     )
 
-    # resolve the region now, so an unsupported location shows up immediately.
-    # resolved from coordinates, not the country, to pick the smallest region.
-    region: str | None = None
-    unsupported: str | None = None
-    try:
-        region = resolve_region(payload.latitude, payload.longitude).id
-    except UnsupportedRegion as exc:
-        unsupported = str(exc)
-
     destination = Destination(
         trip_id=trip.id,
         name=payload.name,
@@ -470,11 +455,7 @@ def create_destination(
         north=north,
         east=east,
         osm_ref=payload.osm_ref,
-        country_code=payload.country_code,
-        region=region,
-        # unsupported destinations are still created, for manual saves.
-        sync_state=SyncState.PENDING if region else SyncState.FAILED,
-        sync_error=unsupported,
+        sync_state=SyncState.PENDING,
     )
     db.add(destination)
 
@@ -491,16 +472,9 @@ def create_destination(
 
     db.refresh(destination)
 
-    # runs after the response is sent. skipped without a region, or when
-    # auto-import is off (see AUTO_IMPORT_REGIONS).
-    if region and settings.AUTO_IMPORT_REGIONS:
-        background_tasks.add_task(start_sync, destination.id)
-    elif region:
-        destination.sync_error = (
-            f"Map data for {region} has not been loaded on this server yet."
-        )
-        db.commit()
-        db.refresh(destination)
+    # runs after the response is sent: one overpass query for this box, or
+    # none if another synced destination already covers it.
+    background_tasks.add_task(start_sync, destination.id)
 
     return _destination_detail(db, destination)
 
@@ -521,24 +495,12 @@ def get_destination(
 def delete_destination(destination_id: int, db: Session = Depends(get_db)) -> None:
     """remove a destination and its saved places.
 
-    the downloaded map data is kept, since it's shared by the whole region.
-    if this was the region's last destination, a running download is
-    cancelled.
+    the cached osm places are kept, since they're shared by every destination.
     """
     destination = _get_destination_or_404(db, destination_id)
-    region = destination.region
 
     db.delete(destination)
     db.commit()
-
-    if region is not None:
-        still_needed = db.scalar(
-            select(func.count())
-            .select_from(Destination)
-            .where(Destination.region == region)
-        )
-        if not still_needed:
-            cancel_download(region)
 
 
 @router.post("/destinations/{destination_id}/sync", response_model=DestinationDetail)
@@ -548,7 +510,7 @@ def resync_destination(
     db: Session = Depends(get_db),
     start_sync: Callable[[int], None] = Depends(get_sync_runner),
 ) -> DestinationDetail:
-    """re-run the import, resuming whatever is incomplete. saved places are untouched."""
+    """re-run the sync. saved places are untouched."""
     destination = _get_destination_or_404(db, destination_id)
 
     destination.sync_state = SyncState.PENDING
@@ -556,8 +518,7 @@ def resync_destination(
     db.commit()
     db.refresh(destination)
 
-    if settings.AUTO_IMPORT_REGIONS:
-        background_tasks.add_task(start_sync, destination_id)
+    background_tasks.add_task(start_sync, destination_id)
     return _destination_detail(db, destination)
 
 
@@ -577,15 +538,6 @@ def _destination_detail(
         )
     ) or 0
 
-    # lets the ui tell a long download from a short import.
-    extract_state: str | None = None
-    if destination.region:
-        extract_state = db.scalar(
-            select(OsmExtract.state).where(
-                OsmExtract.region == destination.region
-            )
-        )
-
     return DestinationDetail(
         id=destination.id,
         name=destination.name,
@@ -599,6 +551,4 @@ def _destination_detail(
         sync_error=destination.sync_error,
         synced_at=destination.synced_at,
         osm_place_count=osm_place_count,
-        region=destination.region,
-        extract_state=ExtractState(extract_state) if extract_state else None,
     )

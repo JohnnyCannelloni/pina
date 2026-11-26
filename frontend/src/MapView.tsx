@@ -463,13 +463,11 @@ export function MapView({
 
       <MapLegend />
 
-      {/* say why the map is empty: never imported vs. genuinely nothing here. */}
+      {/* say why the map is empty: never loaded vs. genuinely nothing here. */}
       {nearby.coverage === "missing" && nearby.total === 0 && (
         <p className="mapview__note" role="status">
-          No OpenStreetMap data has been loaded for this area yet.
-          {destination.region
-            ? ` Run: python -m app.fill_places --region ${destination.region}`
-            : " Pina could not work out which map region covers it."}
+          No OpenStreetMap data has been loaded for this area yet. It loads
+          when a destination here finishes syncing.
         </p>
       )}
 

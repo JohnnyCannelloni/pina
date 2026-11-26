@@ -22,21 +22,16 @@ class Settings(BaseSettings):
         "postgresql+psycopg://pina:pina@localhost:5432/pina_test"
     )
 
-    # --- place data (geofabrik extracts) ---
+    # --- place data (overpass api) ---
 
-    #: geofabrik and nominatim both ask clients to identify themselves.
+    #: overpass and nominatim both ask clients to identify themselves.
     USER_AGENT: str = "Pina/0.1 (single-user travel planner; local development)"
 
-    #: downloaded .osm.pbf files. kept outside the repo; safe to delete.
-    EXTRACT_CACHE_DIR: str = "~/.cache/pina/extracts"
-
-    #: whether adding a destination may start a region download on its own.
-    #: turn off for a hosted deployment and import regions with
-    #: `python -m app.fill_places --region <id>` instead.
-    AUTO_IMPORT_REGIONS: bool = True
-
-    #: per-chunk read timeout, not for the whole download.
-    EXTRACT_READ_TIMEOUT_SECONDS: float = 120.0
+    #: any overpass api instance. the public one asks for fair use: a query
+    #: per destination is fine, bulk scraping isn't.
+    OVERPASS_URL: str = "https://overpass-api.de/api/interpreter"
+    #: server-side query timeout; the http timeout is a little longer.
+    OVERPASS_TIMEOUT_SECONDS: int = 90
 
     # --- geocoding ---
     NOMINATIM_URL: str = "https://nominatim.openstreetmap.org/search"

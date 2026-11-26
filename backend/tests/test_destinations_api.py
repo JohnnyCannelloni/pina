@@ -1,21 +1,11 @@
 """geocoding and adding, polling, retrying and deleting destinations."""
 
-import threading
-
-import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.geocode import GeocodeError, GeocodeResult, parse_results
-from app.models import (
-    Destination,
-    ExtractState,
-    OsmExtract,
-    OsmPlace,
-    Place,
-    SyncState,
-)
+from app.models import Destination, OsmPlace, Place, SyncState
 from app.sync import MAX_DESTINATION_SPAN_DEGREES
 from tests.conftest import FakeGeocoder, RecordingSyncRunner
 
@@ -137,7 +127,7 @@ def test_create_destination_starts_a_sync(
     venice: Destination,
     sync_runner: RecordingSyncRunner,
 ) -> None:
-    """adding a city returns straight away, pending, with its region resolved."""
+    """adding a city returns straight away, pending, with a sync scheduled."""
     response = client.post(
         f"/api/trips/{venice.trip_id}/destinations", json=_create_body(LISBON)
     )
@@ -147,8 +137,12 @@ def test_create_destination_starts_a_sync(
     assert body["name"] == "Lisbon"
     assert body["sync_state"] == SyncState.PENDING
     assert body["osm_place_count"] == 0
-    # geofabrik's own id ("portugal"), resolved from the coordinates.
-    assert body["region"] == "portugal"
+    # the box is stored as sent; it's what the overpass query will use.
+    assert (body["south"], body["west"], body["north"], body["east"]) == (
+        38.69, -9.23, 38.80, -9.09
+    )
+    # region tracking is gone (migration 0007).
+    assert "region" not in body and "extract_state" not in body
 
     # the sync was scheduled for this destination.
     assert sync_runner.started == [body["id"]]
@@ -224,36 +218,10 @@ def test_get_destination_reports_cache_status(
     body = response.json()
     assert body["name"] == "Venice"
     assert body["sync_state"] == SyncState.PENDING
-    assert "osm_place_count" in body and "region" in body
+    assert "osm_place_count" in body
     # the seeded destination's area comes from migration 0003.
     assert body["north"] > body["south"]
     assert body["east"] > body["west"]
-
-
-def test_get_destination_reports_extract_state(
-    client: TestClient, venice: Destination, db_session: Session
-) -> None:
-    """a destination with a region reports its extract's state.
-
-    regression test: this branch once hid a NameError because no test used a
-    destination with a region.
-    """
-    venice.region = "europe/italy"
-    db_session.add(
-        OsmExtract(
-            region="europe/italy",
-            state=ExtractState.READY,
-            place_count=1234,
-        )
-    )
-    db_session.commit()
-
-    response = client.get(f"/api/destinations/{venice.id}")
-    assert response.status_code == 200, response.text
-
-    body = response.json()
-    assert body["region"] == "europe/italy"
-    assert body["extract_state"] == ExtractState.READY
 
 
 def test_resync_reschedules_the_import(
@@ -269,13 +237,15 @@ def test_resync_reschedules_the_import(
     assert sync_runner.started == [venice.id]
 
 
-def test_an_unsupported_location_is_created_but_flagged(
+def test_any_location_gets_a_sync(
     client: TestClient,
     venice: Destination,
     sync_runner: RecordingSyncRunner,
 ) -> None:
-    """a point no region covers still gets a usable destination, marked failed."""
-    # mid-pacific: no geofabrik region contains it.
+    """overpass covers the whole world, so even the middle of the ocean syncs.
+
+    (with geofabrik regions this point used to be "unsupported".)
+    """
     nowhere = GeocodeResult(
         display_name="Point Nemo, Pacific Ocean",
         name="Point Nemo",
@@ -295,10 +265,9 @@ def test_an_unsupported_location_is_created_but_flagged(
     assert response.status_code == 201, response.text
 
     body = response.json()
-    assert body["sync_state"] == SyncState.FAILED
-    assert body["region"] is None
-    assert "No OpenStreetMap region covers" in body["sync_error"]
-    assert sync_runner.started == []
+    assert body["sync_state"] == SyncState.PENDING
+    assert body["sync_error"] is None
+    assert sync_runner.started == [body["id"]]
 
 
 # --- deleting ----------------------------------------------------------------
@@ -342,7 +311,6 @@ def test_deleting_a_destination_keeps_the_map_cache(
             category="cafe",
             latitude=venice.latitude,
             longitude=venice.longitude,
-            region="europe/italy",
         )
     )
     db_session.commit()
@@ -356,54 +324,3 @@ def test_deleting_a_destination_keeps_the_map_cache(
 
 def test_delete_an_unknown_destination_is_a_404(client: TestClient) -> None:
     assert client.delete("/api/destinations/999999").status_code == 404
-
-
-def test_deleting_the_last_destination_in_a_region_cancels_its_download(
-    client: TestClient,
-    venice: Destination,
-    db_session: Session,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """deleting the last destination in a region cancels its download."""
-    import app.sync as sync_module
-
-    venice.region = "europe/italy/nord-est"
-    db_session.commit()
-    download = threading.Event()
-    monkeypatch.setitem(sync_module._downloads, venice.region, download)
-
-    client.delete(f"/api/destinations/{venice.id}")
-
-    assert download.is_set()
-
-
-def test_deleting_a_destination_keeps_a_download_another_one_needs(
-    client: TestClient,
-    venice: Destination,
-    db_session: Session,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """a sibling destination in the same region keeps the download going."""
-    import app.sync as sync_module
-
-    venice.region = "europe/italy/nord-est"
-    db_session.add(
-        Destination(
-            trip_id=venice.trip_id,
-            name="Mestre",
-            latitude=45.49,
-            longitude=12.24,
-            south=45.47,
-            west=12.21,
-            north=45.51,
-            east=12.27,
-            region=venice.region,
-        )
-    )
-    db_session.commit()
-    download = threading.Event()
-    monkeypatch.setitem(sync_module._downloads, venice.region, download)
-
-    client.delete(f"/api/destinations/{venice.id}")
-
-    assert not download.is_set()

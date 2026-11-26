@@ -150,7 +150,7 @@ class NominatimClient:
             "q": cleaned,
             "format": "jsonv2",
             "limit": limit,
-            # needed for country_code, which picks the region to download.
+            # gives country_code, which the add-destination picker receives.
             "addressdetails": 1,
         }
         if viewbox is not None:
