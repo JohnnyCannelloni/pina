@@ -2,11 +2,11 @@
 
 integration tests against a real postgres (pina_test), with the schema built by
 the real migrations and requests going through fastapi's TestClient. each test
-runs in a transaction that is rolled back. the geocoder and sync runner are
-faked, so nothing leaves the machine.
+runs in a transaction that is rolled back. the geocoder, sync runner and
+overpass client are faked, so nothing leaves the machine.
 """
 
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from pathlib import Path
 
 import pytest
@@ -127,10 +127,40 @@ def fake_geocoder() -> Generator[FakeGeocoder, None, None]:
     app.dependency_overrides.pop(get_geocoder, None)
 
 
+class FakeOverpass:
+    """stands in for OverpassClient. returns `elements`, or raises `error`.
+
+    `on_fetch` runs before returning, so a test can change the database
+    mid-sync (e.g. delete the destination being synced).
+    """
+
+    def __init__(self) -> None:
+        self.elements: list[dict] = []
+        self.error: Exception | None = None
+        self.boxes: list[tuple[float, float, float, float]] = []
+        self.on_fetch: Callable[[], None] | None = None
+
+    def fetch(
+        self, south: float, west: float, north: float, east: float
+    ) -> list[dict]:
+        self.boxes.append((south, west, north, east))
+        if self.on_fetch is not None:
+            self.on_fetch()
+        if self.error is not None:
+            raise self.error
+        return self.elements
+
+
+@pytest.fixture
+def fake_overpass() -> FakeOverpass:
+    """a fresh fake overpass client; pass it to sync_destination."""
+    return FakeOverpass()
+
+
 class RecordingSyncRunner:
     """records that a sync was scheduled, without running it.
 
-    the import itself is tested in test_extract.py.
+    the sync itself is tested in test_sync.py.
     """
 
     def __init__(self) -> None:

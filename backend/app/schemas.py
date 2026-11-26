@@ -11,7 +11,7 @@ from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
-from app.models import Category, ExtractState, PlaceSource, SyncState
+from app.models import Category, PlaceSource, SyncState
 
 # strip runs before min_length, so a name of spaces is rejected.
 PlaceName = Annotated[
@@ -130,10 +130,6 @@ class DestinationDetail(DestinationRead):
 
     #: cached osm places inside the destination's area.
     osm_place_count: int
-    #: geofabrik region, e.g. "portugal". None when no region covers it.
-    region: str | None
-    #: the extract's own state, so the ui can tell a download from an import.
-    extract_state: ExtractState | None
 
 
 class DestinationCreate(BaseModel):
@@ -151,8 +147,7 @@ class DestinationCreate(BaseModel):
     north: Latitude
     east: Longitude
     osm_ref: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
-    #: iso 3166-1 alpha-2. optional.
-    country_code: str | None = None
+    # other candidate fields the client sends back (e.g. country_code) are ignored.
 
     @model_validator(mode="after")
     def corners_are_ordered(self) -> Self:
@@ -255,13 +250,13 @@ class Cluster(BaseModel):
 
 
 class Coverage(StrEnum):
-    """whether imported data covers the viewport, so an empty map can say why."""
+    """whether synced destinations cover the viewport, so an empty map can say why."""
 
-    #: one imported region covers the whole viewport.
+    #: one synced destination's area covers the whole viewport.
     COVERED = "covered"
     #: part of the viewport is covered.
     PARTIAL = "partial"
-    #: no imported region overlaps it.
+    #: no synced destination overlaps it.
     MISSING = "missing"
 
 

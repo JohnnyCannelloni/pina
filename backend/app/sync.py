@@ -1,7 +1,7 @@
-"""background sync: resolve a destination's region, download and import it.
+"""background sync: fill a destination's places with one overpass query.
 
-the downloading and parsing live in app/extract.py; this module drives them
-and records progress on the destination and extract rows for the ui.
+pending -> syncing -> ready, or failed with a readable sync_error. the fetching
+and parsing live in app/overpass.py.
 """
 
 from __future__ import annotations
@@ -10,27 +10,30 @@ import logging
 import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
+from typing import Protocol
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.db import SessionLocal
-from app.extract import (
-    ExtractCancelled,
-    ExtractError,
-    download_extract,
-    extract_path,
-    extract_state,
-    import_extract,
+from app.models import Destination, SyncState
+from app.overpass import (
+    MAX_SPAN_DEGREES,
+    OverpassError,
+    check_box,
+    get_overpass,
+    parse_elements,
+    store_places,
 )
-from app.models import Destination, ExtractState, OsmExtract, SyncState
-from app.regions import UnsupportedRegion, find_region, resolve_region
 
 logger = logging.getLogger(__name__)
 
-#: sanity limit per side, in degrees (~220 km). the stored area is only the
-#: map's opening view, so this just rejects continent-sized geocoder boxes.
-MAX_DESTINATION_SPAN_DEGREES = 2.0
+#: new destinations are clamped to this per side, so they always fit in one
+#: overpass query.
+MAX_DESTINATION_SPAN_DEGREES = MAX_SPAN_DEGREES
+
+#: shown when a sync fails for a reason other than overpass itself.
+UNEXPECTED_ERROR = "Something went wrong while saving places. Try again."
 
 
 # destinations currently syncing, so a double click can't start two jobs.
@@ -38,23 +41,13 @@ MAX_DESTINATION_SPAN_DEGREES = 2.0
 _active_lock = threading.Lock()
 _active: set[int] = set()
 
-# cancel flag per region download. a fresh event per sync, so re-adding a city
-# doesn't inherit an old cancellation. guarded by _active_lock.
-_downloads: dict[str, threading.Event] = {}
 
+class PlaceSource(Protocol):
+    """what the sync needs from an overpass client. tests pass a fake."""
 
-def cancel_download(region: str) -> bool:
-    """stop a region's download if one is running. returns whether it was.
-
-    an import that's already running is left to finish.
-    """
-    with _active_lock:
-        event = _downloads.get(region)
-    if event is None:
-        return False
-    event.set()
-    logger.info("cancelling download of %s", region)
-    return True
+    def fetch(
+        self, south: float, west: float, north: float, east: float
+    ) -> list[dict]: ...
 
 
 def clamp_area(
@@ -76,27 +69,40 @@ def clamp_area(
     return south, west, north, east
 
 
-def region_for_destination(destination: Destination) -> str:
-    """the destination's geofabrik region, resolved from its coordinates.
+def _covering_destination(db: Session, destination: Destination) -> Destination | None:
+    """another synced destination whose box fully contains this one, if any.
 
-    raises UnsupportedRegion when nothing covers the point.
+    osm_places is shared by every destination and user, so a city someone
+    already loaded needs no second query.
     """
-    if destination.region:
-        return destination.region
-    return resolve_region(destination.latitude, destination.longitude).id
+    return db.scalar(
+        select(Destination)
+        .where(
+            Destination.id != destination.id,
+            Destination.sync_state == SyncState.READY,
+            Destination.south <= destination.south,
+            Destination.west <= destination.west,
+            Destination.north >= destination.north,
+            Destination.east >= destination.east,
+        )
+        .limit(1)
+    )
 
 
 def sync_destination(
     destination_id: int,
     session_factory: sessionmaker[Session] | None = None,
+    overpass: PlaceSource | None = None,
 ) -> None:
-    """download and import the extract covering a destination.
+    """fill the place cache for a destination's box.
 
     runs as a background task after the response is sent, so it opens its own
-    session. `session_factory` lets tests keep it inside their transaction.
-    never raises: failures are recorded on the destination instead.
+    session. `session_factory` and `overpass` let tests keep it inside their
+    transaction and off the network. never raises: failures are recorded on
+    the destination instead.
     """
     make_session = session_factory or SessionLocal
+    client = overpass or get_overpass()
 
     with _active_lock:
         if destination_id in _active:
@@ -111,122 +117,74 @@ def sync_destination(
                 logger.warning("sync: destination %s is gone", destination_id)
                 return
 
-            try:
-                region = region_for_destination(destination)
-            except UnsupportedRegion as exc:
-                destination.sync_state = SyncState.FAILED
-                destination.sync_error = str(exc)
+            covering = _covering_destination(db, destination)
+            if covering is not None:
+                destination.sync_state = SyncState.READY
+                destination.sync_error = None
+                destination.synced_at = datetime.now(UTC)
                 db.commit()
+                logger.info(
+                    "sync destination %s ready: already covered by destination %s",
+                    destination_id,
+                    covering.id,
+                )
                 return
 
-            # store the region so later lookups can't repoint it.
-            destination.region = region
             destination.sync_state = SyncState.SYNCING
             destination.sync_error = None
             db.commit()
 
-            extract = extract_state(db, region)
+            box = (
+                destination.south,
+                destination.west,
+                destination.north,
+                destination.east,
+            )
 
             try:
-                # download, unless the file is already on disk.
-                if not extract_path(region).exists():
-                    extract.state = ExtractState.DOWNLOADING
-                    extract.error = None
-                    db.commit()
+                check_box(*box)
+                rows = parse_elements(client.fetch(*box))
+                written = store_places(db, rows)
 
-                cancel = threading.Event()
-                with _active_lock:
-                    _downloads[region] = cancel
-                try:
-                    path = download_extract(region, cancel=cancel)
-                finally:
-                    with _active_lock:
-                        # only remove our own flag; a newer sync may have replaced it.
-                        if _downloads.get(region) is cancel:
-                            del _downloads[region]
-                extract.size_bytes = path.stat().st_size
-
-                # import
-                extract.state = ExtractState.IMPORTING
-                db.commit()
-
-                # the whole region, so every viewport inside it is served.
-                written = import_extract(db, region)
-
-                # store the bounds so coverage can tell "empty" from "not imported".
-                bounds = find_region(region)
-                extract.south = bounds.south
-                extract.west = bounds.west
-                extract.north = bounds.north
-                extract.east = bounds.east
-
-                siblings = list(
-                    db.scalars(
-                        select(Destination)
-                        .where(Destination.region == region)
-                        .order_by(Destination.id)
-                    )
-                )
-
-                extract.state = ExtractState.READY
-                extract.place_count = written
-                extract.imported_at = datetime.now(UTC)
-                extract.error = None
-                extract.updated_at = datetime.now(UTC)
-
-                # every destination in the region is filled now.
-                for sibling in siblings:
-                    sibling.sync_state = SyncState.READY
-                    sibling.sync_error = None
-                    sibling.synced_at = datetime.now(UTC)
-
-                db.commit()
-                logger.info(
-                    "sync destination %s ready: %s places from %s",
-                    destination_id,
-                    written,
-                    region,
-                )
-
-            except ExtractCancelled:
-                # nothing needs this region any more. drop the unfinished
-                # tracking row so it doesn't look stuck on "downloading".
-                db.rollback()
-                unfinished = db.scalar(
-                    select(OsmExtract).where(
-                        OsmExtract.region == region,
-                        OsmExtract.state != ExtractState.READY,
-                    )
-                )
-                if unfinished is not None:
-                    db.delete(unfinished)
-
-                # usually the destination is already gone. if not, mark it failed.
+                # the destination may have been deleted while we were fetching.
                 destination = _reload_destination(db, destination_id)
                 if destination is not None:
-                    destination.sync_state = SyncState.FAILED
-                    destination.sync_error = "The download was cancelled."
+                    destination.sync_state = SyncState.READY
+                    destination.sync_error = None
+                    destination.synced_at = datetime.now(UTC)
                 db.commit()
-                logger.info("sync destination %s cancelled", destination_id)
-
-            except ExtractError as exc:
-                # retryable: the next attempt resumes the partial download.
-                db.rollback()
-                extract = extract_state(db, region)
-                extract.state = ExtractState.FAILED
-                extract.error = str(exc)
-                extract.updated_at = datetime.now(UTC)
-
-                destination = _reload_destination(db, destination_id)
-                if destination is not None:
-                    destination.sync_state = SyncState.FAILED
-                    destination.sync_error = str(exc)
-                db.commit()
+            except OverpassError as exc:
                 logger.warning("sync destination %s failed: %s", destination_id, exc)
+                _mark_failed(db, destination_id, str(exc))
+                return
+            except Exception:
+                # anything else (a database error, a bug) must not leave the
+                # destination stuck on syncing.
+                logger.exception("sync destination %s crashed", destination_id)
+                _mark_failed(db, destination_id, UNEXPECTED_ERROR)
+                return
+
+            logger.info(
+                "sync destination %s ready: %s places", destination_id, written
+            )
     finally:
         # always release the claim, even after a crash.
         with _active_lock:
             _active.discard(destination_id)
+
+
+def _mark_failed(db: Session, destination_id: int, message: str) -> None:
+    """record a failed sync, retryable from the ui. the cache keeps what it had."""
+    try:
+        db.rollback()
+        destination = _reload_destination(db, destination_id)
+        if destination is not None:
+            destination.sync_state = SyncState.FAILED
+            destination.sync_error = message
+        db.commit()
+    except Exception:
+        # the database itself is unreachable; nothing more we can record.
+        logger.exception("could not mark destination %s as failed", destination_id)
 
 
 def _reload_destination(db: Session, destination_id: int) -> Destination | None:

@@ -65,21 +65,12 @@ export function SyncStatus({ destination, onUpdate }: SyncStatusProps) {
   }
 
   if (isRunning) {
-    // the extract's state tells a long download from a short import.
-    const detail =
-      destination.extract_state === "downloading"
-        ? "downloading map data for the country — this happens once"
-        : destination.extract_state === "importing"
-          ? "reading the map data"
-          : "getting ready";
-
     return (
       <p className="sync sync--running" role="status">
         <span className="sync__spinner" aria-hidden="true" />
-        Finding places in {destination.name} — {detail}…
+        Finding places in {destination.name} — asking OpenStreetMap…
         <span className="sync__hint">
           You can keep adding places by hand while this runs.
-          {destination.region && ` (${destination.region})`}
         </span>
       </p>
     );
@@ -95,17 +86,14 @@ export function SyncStatus({ destination, onUpdate }: SyncStatusProps) {
           ? `${destination.osm_place_count} places did load, and the map works with those.`
           : "Your own saved places are unaffected."}
       </span>
-      {/* no retry without a region: there's no map data to fetch. */}
-      {destination.region !== null && (
-        <button
-          type="button"
-          className="linkbutton"
-          onClick={handleRetry}
-          disabled={retrying}
-        >
-          {retrying ? "Retrying…" : "Retry"}
-        </button>
-      )}
+      <button
+        type="button"
+        className="linkbutton"
+        onClick={handleRetry}
+        disabled={retrying}
+      >
+        {retrying ? "Retrying…" : "Retry"}
+      </button>
     </p>
   );
 }

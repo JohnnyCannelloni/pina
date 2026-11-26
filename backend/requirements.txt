@@ -4,11 +4,9 @@ sqlalchemy==2.0.36
 alembic==1.14.0
 # psycopg 3; [binary] ships a prebuilt wheel, no local libpq needed.
 psycopg[binary]==3.2.3
-# reads geofabrik .osm.pbf extracts.
-osmium==4.3.2
 pydantic==2.10.4
 pydantic-settings==2.7.0
-# downloads in app/extract.py, and fastapi's TestClient.
+# overpass and nominatim requests, and fastapi's TestClient.
 httpx==0.28.1
 
 # tests

@@ -11,7 +11,6 @@ from datetime import datetime
 from enum import StrEnum
 
 from sqlalchemy import (
-    BigInteger,
     Boolean,
     CheckConstraint,
     DateTime,
@@ -55,16 +54,6 @@ class SyncState(StrEnum):
 
     PENDING = "pending"
     SYNCING = "syncing"
-    READY = "ready"
-    FAILED = "failed"
-
-
-class ExtractState(StrEnum):
-    """state of a region's extract. download and import are separate steps."""
-
-    PENDING = "pending"
-    DOWNLOADING = "downloading"
-    IMPORTING = "importing"
     READY = "ready"
     FAILED = "failed"
 
@@ -121,10 +110,6 @@ class Destination(Base):
 
     # osm id of the city, e.g. "relation/44915". unique per trip. null for the seed.
     osm_ref: Mapped[str | None] = mapped_column(String, nullable=True)
-
-    # which geofabrik region covers it. null when no region does.
-    country_code: Mapped[str | None] = mapped_column(String, nullable=True)
-    region: Mapped[str | None] = mapped_column(String, index=True, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -231,13 +216,14 @@ class OsmPlace(Base):
     """a place that exists in openstreetmap. a cache, not user data.
 
     global since migration 0005: one row per osm place, shared by every
-    destination. safe to truncate and re-import.
+    destination, filled by app/overpass.py. safe to truncate and re-sync.
     """
 
     __tablename__ = "osm_places"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    #: e.g. "node/1234567". globally unique; the upsert key.
+    #: "<type>/<id>", e.g. "node/1234567" or "way/42". globally unique; the
+    #: upsert key, and what Place.source_ref links to.
     source_ref: Mapped[str] = mapped_column(String, nullable=False)
     name: Mapped[str] = mapped_column(String, nullable=False)
     category: Mapped[str] = mapped_column(String, nullable=False)
@@ -246,12 +232,9 @@ class OsmPlace(Base):
     latitude: Mapped[float] = mapped_column(Float, nullable=False)
     longitude: Mapped[float] = mapped_column(Float, nullable=False)
 
-    #: source extract, e.g. "us/new-york".
-    region: Mapped[str] = mapped_column(String, nullable=False, index=True)
-
-    #: whitelisted osm tags written by `place_tags` in app/extract.py.
-    #: `cuisine` is a list; other values are osm strings. null until the region
-    #: is re-imported after 0006. none_as_null so None is sql null, not json null.
+    #: whitelisted osm tags written by `place_tags` in app/overpass.py.
+    #: `cuisine` is a list; other values are osm strings. none_as_null so None
+    #: is sql null, not json null.
     tags: Mapped[dict[str, object] | None] = mapped_column(
         JSONB(none_as_null=True), nullable=True
     )
@@ -277,44 +260,3 @@ class OsmPlace(Base):
         ),
     )
 
-
-class OsmExtract(Base):
-    """one downloaded geofabrik region. answers "do we already have this?"."""
-
-    __tablename__ = "osm_extracts"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    #: e.g. "europe/malta". unique.
-    region: Mapped[str] = mapped_column(String, nullable=False)
-    state: Mapped[str] = mapped_column(
-        String, nullable=False, server_default="pending"
-    )
-    #: places imported from this extract.
-    place_count: Mapped[int] = mapped_column(
-        Integer, nullable=False, server_default="0"
-    )
-    #: big extracts exceed a 32-bit integer.
-    size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    error: Mapped[str | None] = mapped_column(String, nullable=True)
-
-    # region bounds, so coverage can tell "empty" from "not imported". nullable
-    # because the row exists before the bounds are known.
-    south: Mapped[float | None] = mapped_column(Float, nullable=True)
-    west: Mapped[float | None] = mapped_column(Float, nullable=True)
-    north: Mapped[float | None] = mapped_column(Float, nullable=True)
-    east: Mapped[float | None] = mapped_column(Float, nullable=True)
-
-    imported_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-
-    __table_args__ = (
-        CheckConstraint(
-            "state IN ('pending', 'downloading', 'importing', 'ready', 'failed')",
-            name="ck_osm_extracts_state",
-        ),
-        UniqueConstraint("region", name="uq_osm_extracts_region"),
-    )

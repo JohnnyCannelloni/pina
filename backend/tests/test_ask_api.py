@@ -68,7 +68,6 @@ def place(
             category=category,
             latitude=at[0],
             longitude=at[1],
-            region="nord-est",
             tags=tags,
         )
     )
